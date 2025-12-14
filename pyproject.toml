@@ -1,0 +1,9 @@
+[project]
+name = "etc-nomad-mcp"
+version = "0.1.0"
+description = "MCP server for ETC Nomad"
+dependencies = [
+    "fastmcp",
+    "python-osc",
+]
+requires-python = ">=3.10"
