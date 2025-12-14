@@ -36,7 +36,7 @@ def handle_active_cue(address, *args):
     Example address: /eos/out/active/cue/1/5
     """
     parts = address.split('/')
-    if len(parts) >= 6:
+    if len(parts) >= 7:
         list_num = parts[5]
         cue_num = parts[6]
         percent = args[0] if args else 0.0
@@ -55,7 +55,7 @@ def handle_pending_cue(address, *args):
     Handles /eos/out/pending/cue/<list>/<cue>
     """
     parts = address.split('/')
-    if len(parts) >= 6:
+    if len(parts) >= 7:
         list_num = parts[5]
         cue_num = parts[6]
         
@@ -664,6 +664,38 @@ def get_system_state() -> str:
         info.append(f"XYZ: {eos_state['xyz']}")
     
     return "\n".join(info)
+
+@mcp.tool()
+def sync_state() -> str:
+    """
+    Forces Eos to re-send all current status information.
+    STRONGLY RECOMMENDED: Call this tool immediately upon startup to populate the state.
+    """
+    client.send_message("/eos/get/cue/active", [])
+    client.send_message("/eos/get/cue/pending", [])
+    
+    client.send_message("/eos/get/version", [])
+    client.send_message("/eos/get/cmd", [])
+    client.send_message("/eos/get/setup", [])
+
+    # Request fader banks (0, 1, 2)
+    client.send_message("/eos/fader/0/config", []) 
+    client.send_message("/eos/fader/1/config", []) 
+    
+    # Request direct selects bank 1
+    client.send_message("/eos/ds/1/config", [])
+    
+    return "Synchronization requests sent to Eos."
+
+@mcp.prompt()
+def system_instructions() -> str:
+    """Returns the system instructions for using this MCP server."""
+    return (
+        "You are controlling an ETC Eos lighting console via OSC.\n"
+        "The current state of the console (cues, faders, etc.) is NOT automatically known.\n"
+        "You MUST call the `sync_state` tool immediately upon starting to populate the state.\n"
+        "Wait for the confirmation message before querying for specific status.\n"
+    )
 
 if __name__ == "__main__":
     mcp.run()
