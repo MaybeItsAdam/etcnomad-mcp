@@ -44,8 +44,8 @@ eos_mcp/
 ## Prerequisites
 
 - An Eos family console or ETCnomad
-- Python 3.10+
-- [`uv`](https://docs.astral.sh/uv/) (or pip)
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) — no separate Python install
+  or clone needed; `uv` fetches Python and the server itself.
 
 ## Setup
 
@@ -62,28 +62,17 @@ Browser → Setup → System Settings → System → Show Control → OSC:
 `OSC UDP RX Port` must match this server's `EOS_PORT_TX`, and `OSC UDP TX Port` must match its
 `EOS_PORT_RX`. They are named from the console's point of view, so they look crossed over.
 
-**2. Install.**
+**2. Add it to your MCP client.**
 
-```bash
-uv sync
-```
-
-**3. Run.**
-
-```bash
-uv run eos_server.py     # or, once installed: eos-mcp
-```
-
-## Connecting a client
-
-For Claude Desktop, add this to `claude_desktop_config.json`:
+For Claude Desktop, add this to `claude_desktop_config.json`
+(Settings → Developer → Edit Config):
 
 ```json
 {
   "mcpServers": {
     "eos": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/eos-mcp", "run", "eos_server.py"],
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/MaybeItsAdam/eos-mcp", "eos-mcp"],
       "env": {
         "EOS_IP": "127.0.0.1",
         "EOS_PORT_TX": "8000",
@@ -93,6 +82,13 @@ For Claude Desktop, add this to `claude_desktop_config.json`:
   }
 }
 ```
+
+`uvx` fetches and caches the server straight from GitHub on first launch — nothing to clone or
+install by hand. Restart Claude Desktop after editing the config. Any MCP client that launches a
+command works the same way; drop the `command`/`args`/`env` above into its config format.
+
+To pin to a specific commit instead of tracking `main`, append `@<commit-sha>` to the repo URL,
+e.g. `"git+https://github.com/MaybeItsAdam/eos-mcp@<sha>"`.
 
 The server also publishes a `system_instructions` prompt covering how to sync state and when
 to confirm before acting.
@@ -179,12 +175,18 @@ your MCP client may hide them.
 ## Development
 
 ```bash
+git clone https://github.com/MaybeItsAdam/eos-mcp
+cd eos-mcp
 uv sync --all-groups
 uv run pytest          # test suite; no console required
 uv run ruff check .
 uv run ruff format .
 uv run mypy
 ```
+
+To point a client at your local checkout instead of GitHub, use
+`"command": "uv", "args": ["--directory", "/absolute/path/to/eos-mcp", "run", "eos_server.py"]`
+in place of the `uvx` block above.
 
 The tests build genuine OSC datagrams and run them through the real python-osc dispatcher, and
 the integration tests bind a listener on an ephemeral port, so the receive path is covered
