@@ -1,45 +1,50 @@
+"""Cue playback: firing cues and driving the master playback pair."""
+
+from __future__ import annotations
+
 from ..app import mcp
-from ..eos_client import client
+from ..osc import address as addr
+from ._common import TargetNumber, ToolResult, guarded, press, send
 
 
 @mcp.tool()
-def fire_cue(list_number: int, cue_number: str) -> str:
-    """Fires a specific cue."""
-    address = f"/eos/cue/{list_number}/{cue_number}/fire"
-    client.send_message(address, 1.0)
-    print(f"Sent: {address}")
-    return f"Fired cue {cue_number} in list {list_number}"
+@guarded("fire_cue")
+def fire_cue(list_number: TargetNumber, cue_number: str) -> ToolResult:
+    """Fires a specific cue immediately.
+
+    Args:
+        list_number: Cue list number.
+        cue_number: Cue number. Point cues such as "1.5" are supported.
+    """
+    cue = addr.cue_number(cue_number)
+    return send(
+        f"/eos/cue/{list_number}/{cue}/fire",
+        1.0,
+        action="fire_cue",
+        detail=f"Fired cue {cue} in list {list_number}",
+    )
+
 
 @mcp.tool()
-def go_cue() -> str:
-    """Presses the Go button for the master playback pair."""
-    address = "/eos/key/go_0"
-    client.send_message(address, 1.0)
-    client.send_message(address, 0.0)
-    print(f"Sent Go")
-    return "Pressed Go"
+@guarded("go_cue")
+def go_cue() -> ToolResult:
+    """Presses Go on the master playback pair, advancing to the next cue."""
+    return press("/eos/key/go_0", action="go_cue", detail="Pressed Go")
+
 
 @mcp.tool()
-def stop_back_cue() -> str:
-    """Presses the Stop/Back button."""
-    address = "/eos/key/stop"
-    client.send_message(address, 1.0)
-    client.send_message(address, 0.0)
-    print(f"Sent Stop/Back")
-    return "Pressed Stop/Back"
+@guarded("stop_back_cue")
+def stop_back_cue() -> ToolResult:
+    """Presses Stop/Back: halts a running fade, or steps back if nothing is running."""
+    return press("/eos/key/stop", action="stop_back_cue", detail="Pressed Stop/Back")
+
 
 @mcp.tool()
-def request_setup() -> str:
-    """Requests setup info."""
-    address = "/eos/get/setup"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return "Requested setup info."
+@guarded("reset_osc")
+def reset_osc() -> ToolResult:
+    """Asks Eos to reset its OSC connection.
 
-@mcp.tool()
-def reset_osc() -> str:
-    """Resets OSC connections."""
-    address = "/eos/reset"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return "Sent OSC Reset"
+    Useful if the console has stopped sending updates. Follow it with
+    `sync_state` to repopulate.
+    """
+    return send("/eos/reset", action="reset_osc", detail="Sent OSC reset")

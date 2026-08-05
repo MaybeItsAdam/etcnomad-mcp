@@ -1,49 +1,67 @@
+"""Presets, palettes, snapshots, and submasters."""
+
+from __future__ import annotations
+
 from ..app import mcp
-from ..eos_client import client
+from ._common import (
+    Normalised,
+    PaletteType,
+    TargetNumber,
+    ToolResult,
+    guarded,
+    send,
+)
+
+#: Eos OSC address stems for each palette type.
+_PALETTE_STEMS = {"intensity": "ip", "focus": "fp", "color": "cp", "beam": "bp"}
+
 
 @mcp.tool()
-def fire_preset(preset: int) -> str:
-    """Fires (recalls) a preset."""
-    address = "/eos/preset/fire"
-    client.send_message(address, preset)
-    print(f"Sent: {address} {preset}")
-    return f"Fired Preset {preset}"
+@guarded("fire_preset")
+def fire_preset(preset: TargetNumber) -> ToolResult:
+    """Recalls a preset onto the current selection."""
+    return send("/eos/preset/fire", preset, action="fire_preset", detail=f"Fired preset {preset}")
+
 
 @mcp.tool()
-def fire_palette(palette_type: str, number: int) -> str:
-    """Fires a palette.
+@guarded("fire_palette")
+def fire_palette(palette_type: PaletteType, number: TargetNumber) -> ToolResult:
+    """Recalls a palette onto the current selection.
 
     Args:
-        palette_type: "intensity" (ip), "focus" (fp), "color" (cp), or "beam" (bp).
+        palette_type: Which palette family to recall from.
         number: Palette number.
     """
-    type_map = {
-        "intensity": "ip", "ip": "ip",
-        "focus": "fp", "fp": "fp",
-        "color": "cp", "cp": "cp",
-        "beam": "bp", "bp": "bp"
-    }
-    pt = type_map.get(palette_type.lower())
-    if not pt:
-        return "Invalid palette type. Use intensity, focus, color, or beam."
+    stem = _PALETTE_STEMS[palette_type]
+    return send(
+        f"/eos/{stem}/fire",
+        number,
+        action="fire_palette",
+        detail=f"Fired {palette_type} palette {number}",
+    )
 
-    address = f"/eos/{pt}/fire"
-    client.send_message(address, number)
-    print(f"Sent: {address} {number}")
-    return f"Fired {palette_type} palette {number}"
 
 @mcp.tool()
-def recall_snapshot(snapshot: int) -> str:
-    """Recalls a snapshot."""
-    address = "/eos/snap"
-    client.send_message(address, snapshot)
-    print(f"Sent: {address} {snapshot}")
-    return f"Recalled Snapshot {snapshot}"
+@guarded("recall_snapshot")
+def recall_snapshot(snapshot: TargetNumber) -> ToolResult:
+    """Recalls a snapshot, restoring a saved console layout/state."""
+    return send(
+        "/eos/snap", snapshot, action="recall_snapshot", detail=f"Recalled snapshot {snapshot}"
+    )
+
 
 @mcp.tool()
-def bump_sub(sub: int, level: float = 1.0) -> str:
-    """Bumps a submaster to a level (default 1.0 / 100%)."""
-    address = f"/eos/sub/{sub}/fire"
-    client.send_message(address, level)
-    print(f"Sent: {address} {level}")
-    return f"Bumped Sub {sub} to {level}"
+@guarded("bump_sub")
+def bump_sub(sub: TargetNumber, level: Normalised = 1.0) -> ToolResult:
+    """Bumps a submaster to a level.
+
+    Args:
+        sub: Submaster number.
+        level: Normalised level, 0.0-1.0. Defaults to full.
+    """
+    return send(
+        f"/eos/sub/{sub}/fire",
+        level,
+        action="bump_sub",
+        detail=f"Bumped sub {sub} to {level}",
+    )

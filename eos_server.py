@@ -1,8 +1,8 @@
-"""Entry point for the ETC Eos MCP server.
+"""Entry point shim for the ETC Eos MCP server.
 
-The implementation now lives in the ``eos_mcp`` package; this thin shim
-preserves the documented launch command (``uv run eos_server.py``) and the
-existing ``claude_desktop_config.json`` configuration.
+The implementation lives in the ``eos_mcp`` package. This preserves the
+documented ``uv run eos_server.py`` launch command; installing the package also
+provides an ``eos-mcp`` console script that does the same thing.
 """
 
 from eos_mcp.server import run

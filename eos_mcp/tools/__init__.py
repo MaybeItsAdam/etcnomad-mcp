@@ -1,13 +1,27 @@
+"""Importing this package registers every tool with the FastMCP app."""
+
 from . import (
-    levels,
-    wheels,
     color_position,
-    selection,
-    keys_macros,
-    presets,
-    faders,
     cue_list_banks,
+    faders,
+    keys_macros,
+    levels,
     playback,
+    presets,
     queries,
-    vision,
-)  # noqa: F401
+    selection,
+    wheels,
+)
+
+__all__ = [
+    "color_position",
+    "cue_list_banks",
+    "faders",
+    "keys_macros",
+    "levels",
+    "playback",
+    "presets",
+    "queries",
+    "selection",
+    "wheels",
+]

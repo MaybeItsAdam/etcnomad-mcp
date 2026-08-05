@@ -1,28 +1,42 @@
+"""Hardkeys, softkeys, and macros."""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from pydantic import Field
+
 from ..app import mcp
-from ..eos_client import client
+from ..osc import address as addr
+from ._common import TargetNumber, ToolResult, guarded, press, send
+
 
 @mcp.tool()
-def press_key(key_name: str) -> str:
-    """Presses and releases a hardkey (e.g., "Data", "About", "Go_To_Cue")."""
-    address = f"/eos/key/{key_name}"
-    client.send_message(address, 1.0)
-    client.send_message(address, 0.0)
-    print(f"Sent Key Press: {key_name}")
-    return f"Pressed key {key_name}"
+@guarded("press_key")
+def press_key(key_name: str) -> ToolResult:
+    """Presses and releases a console hardkey.
+
+    Args:
+        key_name: The Eos key name, e.g. "Data", "About", "go_0", "stop",
+            "live", "blind". Letters, digits and underscores only.
+    """
+    key = addr.segment(key_name, "key_name")
+    return press(f"/eos/key/{key}", action="press_key", detail=f"Pressed key {key}")
+
 
 @mcp.tool()
-def fire_macro(macro: int) -> str:
+@guarded("fire_macro")
+def fire_macro(macro: TargetNumber) -> ToolResult:
     """Fires a macro."""
-    address = "/eos/macro/fire"
-    client.send_message(address, macro)
-    print(f"Sent: {address} {macro}")
-    return f"Fired Macro {macro}"
+    return send("/eos/macro/fire", macro, action="fire_macro", detail=f"Fired macro {macro}")
+
 
 @mcp.tool()
-def press_softkey(index: int) -> str:
-    """Presses a softkey (1-12)."""
-    address = f"/eos/softkey/{index}"
-    client.send_message(address, 1.0)
-    client.send_message(address, 0.0)
-    print(f"Sent Softkey: {index}")
-    return f"Pressed Softkey {index}"
+@guarded("press_softkey")
+def press_softkey(index: Annotated[int, Field(ge=1, le=12)]) -> ToolResult:
+    """Presses a softkey.
+
+    Args:
+        index: Softkey position, 1-12.
+    """
+    return press(f"/eos/softkey/{index}", action="press_softkey", detail=f"Pressed softkey {index}")

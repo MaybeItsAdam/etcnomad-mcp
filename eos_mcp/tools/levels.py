@@ -1,95 +1,138 @@
+"""Command line, intensity levels, parameters, and raw DMX output."""
+
+from __future__ import annotations
+
+from typing import Literal
+
 from ..app import mcp
-from ..eos_client import client
+from ..errors import EosValidationError
+from ..osc import address as addr
+from ._common import (
+    DmxValue,
+    LevelModifier,
+    ParamModifier,
+    Percent,
+    TargetNumber,
+    ToolResult,
+    guarded,
+    send,
+)
 
 
 @mcp.tool()
-def command_line(command: str) -> str:
-    """Sends a command to the ETC Nomad command line.
+@guarded("command_line")
+def command_line(command: str) -> ToolResult:
+    """Types a command into the Eos command line and executes it.
+
+    This is the most powerful tool available - it can express anything the
+    console can do, including record and delete operations. Prefer a specific
+    tool when one exists.
 
     Args:
-        command: The command string (e.g., "Chan 1 At 50").
+        command: The command string, e.g. "Chan 1 At 50" or "Chan 1 Thru 10 Out".
     """
-    address = "/eos/cmd"
-    client.send_message(address, command)
-    print(f"Sent: {address} '{command}'")
-    return f"Sent command: {command}"
+    text = command.strip()
+    if not text:
+        raise EosValidationError("command must not be empty")
+    return send("/eos/cmd", text, action="command_line", detail=f"Sent command: {text}")
+
 
 @mcp.tool()
-def set_level(value: float) -> str:
-    """Sets the level of the currently selected channels (0-100)."""
-    address = "/eos/at"
-    client.send_message(address, value)
-    print(f"Sent: {address} {value}")
-    return f"Set level to {value}"
-
-@mcp.tool()
-def set_level_mod(modification: str) -> str:
-    """Sets level variants.
+@guarded("set_level")
+def set_level(value: Percent) -> ToolResult:
+    """Sets the intensity of the currently selected channels.
 
     Args:
-        modification: "out", "home", "remdim", "level", "full", "min", "max", "+%", "-%".
+        value: Intensity percentage, 0-100.
     """
-    address = f"/eos/at/{modification}"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return f"Set level modification: {modification}"
+    return send("/eos/at", value, action="set_level", detail=f"Set level to {value}")
+
 
 @mcp.tool()
-def set_channel_mod(channel: int, modification: str) -> str:
-    """Sets level variants for a specific channel.
+@guarded("apply_modifier")
+def apply_modifier(
+    modifier: LevelModifier,
+    target: Literal["selection", "channel", "group"] = "selection",
+    number: TargetNumber | None = None,
+) -> ToolResult:
+    """Applies an intensity modifier to the current selection, a channel, or a group.
 
     Args:
-        channel: Channel number.
-        modification: "out", "home", "remdim", "level", "full", "min", "max", "+%", "-%".
+        modifier: The modifier to apply, e.g. "full", "out", "home".
+        target: What to apply it to. "selection" uses whatever is currently
+            selected; "channel" and "group" require `number`.
+        number: Channel or group number. Required unless target is "selection".
     """
-    address = f"/eos/chan/{channel}/{modification}"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return f"Set Channel {channel} mod: {modification}"
+    mod = addr.segment(modifier, "modifier")
+
+    if target == "selection":
+        if number is not None:
+            raise EosValidationError("number must be omitted when target is 'selection'")
+        return send(
+            f"/eos/at/{mod}",
+            action="apply_modifier",
+            detail=f"Applied '{modifier}' to the current selection",
+        )
+
+    if number is None:
+        raise EosValidationError(f"number is required when target is '{target}'")
+
+    prefix = "chan" if target == "channel" else "group"
+    return send(
+        f"/eos/{prefix}/{number}/{mod}",
+        action="apply_modifier",
+        detail=f"Applied '{modifier}' to {target} {number}",
+    )
+
 
 @mcp.tool()
-def set_group_mod(group: int, modification: str) -> str:
-    """Sets level variants for a specific group.
+@guarded("set_parameter")
+def set_parameter(param: str, value: float) -> ToolResult:
+    """Sets a named parameter on the current selection to a value.
 
     Args:
-        group: Group number.
-        modification: "out", "home", "remdim", "level", "full", "min", "max", "+%", "-%".
+        param: Parameter name, e.g. "pan", "tilt", "zoom", "edge".
+        value: Value to set, in the parameter's own units.
     """
-    address = f"/eos/group/{group}/{modification}"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return f"Set Group {group} mod: {modification}"
+    name = addr.segment(param, "param")
+    return send(
+        f"/eos/param/{name}",
+        value,
+        action="set_parameter",
+        detail=f"Set {name} to {value}",
+    )
+
 
 @mcp.tool()
-def set_parameter(param: str, value: float) -> str:
-    """Sets a specific parameter to a value.
+@guarded("set_parameter_mod")
+def set_parameter_mod(param: str, modification: ParamModifier) -> ToolResult:
+    """Applies a modifier to a named parameter on the current selection.
 
     Args:
-        param: Parameter name (e.g., "pan", "tilt", "zoom").
-        value: Value to set.
+        param: Parameter name, e.g. "pan", "zoom".
+        modification: The modifier to apply, e.g. "home", "full".
     """
-    address = f"/eos/param/{param}"
-    client.send_message(address, value)
-    print(f"Sent: {address} {value}")
-    return f"Set {param} to {value}"
+    name = addr.segment(param, "param")
+    mod = addr.segment(modification, "modification")
+    return send(
+        f"/eos/param/{name}/{mod}",
+        action="set_parameter_mod",
+        detail=f"Applied '{modification}' to {name}",
+    )
+
 
 @mcp.tool()
-def set_parameter_mod(param: str, modification: str) -> str:
-    """Sets parameter variants.
+@guarded("set_dmx")
+def set_dmx(address_num: TargetNumber, value: DmxValue) -> ToolResult:
+    """Sets a raw DMX address to an 8-bit level, bypassing channel patching.
 
     Args:
-        param: Parameter name.
-        modification: "out", "home", "level", "full", "min", "max", "+%", "-%".
+        address_num: 1-based DMX address.
+        value: Output level, 0-255.
     """
-    address = f"/eos/param/{param}/{modification}"
-    client.send_message(address, [])
-    print(f"Sent: {address}")
-    return f"Set {param} modification: {modification}"
-
-@mcp.tool()
-def set_dmx(address_num: int, value: int) -> str:
-    """Sets a DMX address to a level (0-255)."""
-    address = f"/eos/addr/{address_num}/DMX"
-    client.send_message(address, value)
-    print(f"Sent: {address} {value}")
-    return f"Set DMX address {address_num} to {value}"
+    return send(
+        f"/eos/addr/{address_num}/DMX",
+        value,
+        action="set_dmx",
+        detail=f"Set DMX address {address_num} to {value}",
+    )

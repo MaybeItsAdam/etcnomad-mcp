@@ -1,62 +1,87 @@
+"""Selecting channels, groups, and other console targets."""
+
+from __future__ import annotations
+
 from ..app import mcp
-from ..eos_client import client
+from ..osc import address as addr
+from ._common import TargetNumber, ToolResult, guarded, send
+
 
 @mcp.tool()
-def select_channel(channel: str) -> str:
-    """Selects a channel number (or range string)."""
-    address = "/eos/chan"
-    try:
-        val = int(channel)
-        client.send_message(address, val)
-    except ValueError:
-        return f"Invalid channel number: {channel}. Use command_line for ranges."
-    print(f"Sent: {address} {channel}")
-    return f"Selected Channel {channel}"
+@guarded("select_channel")
+def select_channel(channel: str) -> ToolResult:
+    """Selects a channel or a range of channels.
+
+    A plain number is sent directly. Anything else (a range such as
+    "1 Thru 10", or a list such as "1+5+9") is routed through the command line,
+    which is the only way Eos accepts a multi-channel selection over OSC.
+
+    Args:
+        channel: A channel number, or a range/list expression.
+    """
+    spec = addr.channel_spec(channel)
+    if spec.isdigit():
+        return send(
+            "/eos/chan",
+            int(spec),
+            action="select_channel",
+            detail=f"Selected channel {spec}",
+        )
+    return send(
+        "/eos/cmd",
+        f"Chan {spec}",
+        action="select_channel",
+        detail=f"Selected channels '{spec}' via the command line",
+    )
+
 
 @mcp.tool()
-def select_group(group: int) -> str:
+@guarded("select_group")
+def select_group(group: TargetNumber) -> ToolResult:
     """Selects a group."""
-    address = "/eos/group"
-    client.send_message(address, group)
-    print(f"Sent: {address} {group}")
-    return f"Selected Group {group}"
+    return send("/eos/group", group, action="select_group", detail=f"Selected group {group}")
+
 
 @mcp.tool()
-def select_address_target(address_num: int) -> str:
-    """Selects an address (as a target)."""
-    address = "/eos/addr"
-    client.send_message(address, address_num)
-    print(f"Sent: {address} {address_num}")
-    return f"Selected Address {address_num}"
+@guarded("select_address_target")
+def select_address_target(address_num: TargetNumber) -> ToolResult:
+    """Selects a DMX address as the current target."""
+    return send(
+        "/eos/addr",
+        address_num,
+        action="select_address_target",
+        detail=f"Selected address {address_num}",
+    )
+
 
 @mcp.tool()
-def select_curve(curve: int) -> str:
+@guarded("select_curve")
+def select_curve(curve: TargetNumber) -> ToolResult:
     """Selects a curve."""
-    address = "/eos/curve"
-    client.send_message(address, curve)
-    print(f"Sent: {address} {curve}")
-    return f"Selected Curve {curve}"
+    return send("/eos/curve", curve, action="select_curve", detail=f"Selected curve {curve}")
+
 
 @mcp.tool()
-def select_effect(effect: int) -> str:
+@guarded("select_effect")
+def select_effect(effect: TargetNumber) -> ToolResult:
     """Selects an effect."""
-    address = "/eos/fx"
-    client.send_message(address, effect)
-    print(f"Sent: {address} {effect}")
-    return f"Selected Effect {effect}"
+    return send("/eos/fx", effect, action="select_effect", detail=f"Selected effect {effect}")
+
 
 @mcp.tool()
-def select_pixel_map(pixmap: int) -> str:
-    """Selects a Pixel Map."""
-    address = "/eos/pixmap"
-    client.send_message(address, pixmap)
-    print(f"Sent: {address} {pixmap}")
-    return f"Selected Pixel Map {pixmap}"
+@guarded("select_pixel_map")
+def select_pixel_map(pixmap: TargetNumber) -> ToolResult:
+    """Selects a pixel map."""
+    return send(
+        "/eos/pixmap",
+        pixmap,
+        action="select_pixel_map",
+        detail=f"Selected pixel map {pixmap}",
+    )
+
 
 @mcp.tool()
-def open_magic_sheet(ms: int) -> str:
-    """Opens a Magic Sheet."""
-    address = "/eos/ms"
-    client.send_message(address, ms)
-    print(f"Sent: {address} {ms}")
-    return f"Opened Magic Sheet {ms}"
+@guarded("open_magic_sheet")
+def open_magic_sheet(ms: TargetNumber) -> ToolResult:
+    """Opens a magic sheet."""
+    return send("/eos/ms", ms, action="open_magic_sheet", detail=f"Opened magic sheet {ms}")
