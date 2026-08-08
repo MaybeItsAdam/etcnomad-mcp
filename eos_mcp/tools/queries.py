@@ -9,6 +9,7 @@ yet, which is deliberately distinct from a real value.
 from __future__ import annotations
 
 import ipaddress
+import socket
 import time
 
 from ..app import mcp
@@ -39,6 +40,34 @@ def _age(last_update: float | None) -> float | None:
     if last_update is None:
         return None
     return round(time.monotonic() - last_update, 3)
+
+
+def _local_address() -> str | None:
+    """This machine's outbound IPv4 address, or ``None`` if it cannot be found.
+
+    Used to tell the user the exact value to type into the console rather than
+    "use your LAN address". Opening a UDP socket to an unroutable address makes
+    the OS pick the interface it would send from; nothing is transmitted.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # TEST-NET-1 (RFC 5737). Reserved for documentation, never routed.
+            sock.connect(("192.0.2.1", 9))
+            address = str(sock.getsockname()[0])
+        finally:
+            sock.close()
+    except OSError:
+        return None
+    return None if address.startswith("127.") else address
+
+
+def _tx_address_hint() -> str:
+    """Name the address the console should transmit to, if it can be determined."""
+    address = _local_address()
+    if not address:
+        return ""
+    return f" This machine is currently {address}, so that is the value to enter."
 
 
 def _sender_is_console(last_sender: str | None) -> bool:
@@ -279,8 +308,10 @@ def get_connection_health() -> ToolResult:
             "address of the machine running this server, and NOT 127.0.0.1 - Eos does "
             "not bind its transmit socket to loopback, so a loopback address sends to "
             "nobody even on a single machine, while TX still reads as enabled and "
-            f"commands still land; (2) OSC TX is enabled; (3) OSC UDP TX Port matches "
-            f"{config.port_rx}."
+            f"commands still land.{_tx_address_hint()} Then (2) OSC TX is enabled; "
+            f"(3) OSC UDP TX Port matches {config.port_rx}. Note this address changes "
+            "when the machine joins a different network, and these are show-file "
+            "settings, so loading or reloading a show reverts them."
         )
     elif _sender_is_console(s.last_sender):
         detail = f"Healthy. Last OSC message from the console ({s.last_sender}) {age:.1f}s ago."

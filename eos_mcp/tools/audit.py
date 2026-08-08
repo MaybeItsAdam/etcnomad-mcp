@@ -16,10 +16,22 @@ from ..app import mcp
 from ._common import ToolResult, guarded, success
 from .inventory import TARGET_TYPES, _enumerate
 
-#: Types worth checking for duplicate and inconsistent labels. Patch is
-#: excluded from duplicate-label checks because repeated labels there are
-#: normal - six channels of the same wash legitimately share a name.
-LABELLED_TYPES = ("sub", "effect", "group", "preset", "macro", "cuelist")
+#: Types where a repeated label means something was recorded twice. Patch is
+#: absent by design: six channels of one wash sharing a name is normal, and
+#: reporting it would bury the real findings.
+DUPLICATE_TYPES = ("sub", "effect", "group", "preset", "macro", "cuelist")
+
+#: Types where labels differing only by case are worth reporting. Patch *is*
+#: included: "Houselights" next to "HOUSELIGHTS" is a genuine inconsistency,
+#: and excluding patch wholesale missed exactly that on a real show.
+CASE_VARIANT_TYPES = (*DUPLICATE_TYPES, "patch")
+
+#: Types where a missing label is worth reporting. Patch is absent: unlabelled
+#: channels are the norm rather than a defect.
+UNLABELLED_TYPES = DUPLICATE_TYPES
+
+#: Every type the audit enumerates, in a stable order.
+LABELLED_TYPES = (*DUPLICATE_TYPES, "patch")
 
 
 def _duplicate_labels(rows: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -83,9 +95,9 @@ def audit_show() -> ToolResult:
         if not rows:
             continue
 
-        duplicates = _duplicate_labels(rows)
-        variants = _case_variants(rows)
-        blank = _unlabelled(rows)
+        duplicates = _duplicate_labels(rows) if friendly in DUPLICATE_TYPES else []
+        variants = _case_variants(rows) if friendly in CASE_VARIANT_TYPES else []
+        blank = _unlabelled(rows) if friendly in UNLABELLED_TYPES else []
         if not (duplicates or variants or blank):
             continue
 

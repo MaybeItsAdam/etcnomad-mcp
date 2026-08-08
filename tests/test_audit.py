@@ -64,3 +64,21 @@ def test_missing_label_key_is_tolerated() -> None:
     rows = [{"number": "1"}]
     assert _duplicate_labels(rows) == []
     assert _unlabelled(rows) == ["1"]
+
+
+# --- Which checks apply to which type ------------------------------------
+
+
+def test_patch_is_checked_for_case_variants() -> None:
+    """Excluding patch wholesale missed Houselights/HOUSELIGHTS on a real show."""
+    from eos_mcp.tools.audit import CASE_VARIANT_TYPES
+
+    assert "patch" in CASE_VARIANT_TYPES
+
+
+def test_patch_is_not_checked_for_duplicates_or_blanks() -> None:
+    """Channels sharing a wash name, or having no label, are normal in patch."""
+    from eos_mcp.tools.audit import DUPLICATE_TYPES, UNLABELLED_TYPES
+
+    assert "patch" not in DUPLICATE_TYPES
+    assert "patch" not in UNLABELLED_TYPES
