@@ -13,6 +13,7 @@ from eos_mcp.tools.cue_list_banks import select_cue_list_bank_cue
 from eos_mcp.tools.faders import control_fader_button, press_direct_select, set_fader
 from eos_mcp.tools.keys_macros import press_key, press_softkey
 from eos_mcp.tools.levels import apply_modifier, command_line, set_dmx, set_level, set_parameter
+from eos_mcp.tools.patch import set_patch_gel, set_patch_label, set_patch_text
 from eos_mcp.tools.playback import fire_cue, go_cue
 from eos_mcp.tools.presets import fire_palette
 from eos_mcp.tools.queries import get_active_cue, get_connection_health, get_live_blind_state
@@ -33,7 +34,23 @@ def test_command_line_sends_text_as_argument(sent: RecordingUDPClient) -> None:
     """The command is an OSC argument, never part of the address."""
     result = command_line("Chan 1 Thru 10 At 50")
     assert result["ok"] is True
-    assert sent.messages == [("/eos/cmd", "Chan 1 Thru 10 At 50")]
+    assert sent.messages == [("/eos/newcmd", "Chan 1 Thru 10 At 50")]
+
+
+def test_command_line_resets_the_command_line_by_default(sent: RecordingUDPClient) -> None:
+    """Eos appends to whatever is already pending, so reset is the safe default.
+
+    A leftover fragment silently turns the next command into a syntax error, or
+    into a different valid command.
+    """
+    command_line("Chan 1 At 50 Enter")
+    assert sent.messages[0][0] == "/eos/newcmd"
+
+
+def test_command_line_can_append_when_reset_is_false(sent: RecordingUDPClient) -> None:
+    result = command_line("Thru 10 At 50", reset=False)
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/cmd", "Thru 10 At 50")]
 
 
 def test_fire_cue_supports_point_cues(sent: RecordingUDPClient) -> None:
@@ -218,3 +235,65 @@ def test_connection_health_reports_no_data_yet() -> None:
     assert result["ok"] is True
     assert result["has_data"] is False
     assert "command_target" in result
+
+
+# --- Patch ---------------------------------------------------------------
+
+
+def test_set_patch_label_targets_the_channel(sent: RecordingUDPClient) -> None:
+    result = set_patch_label(14, "LED power")
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/set/patch/14/label", "LED power")]
+
+
+def test_set_patch_text_targets_the_numbered_field(sent: RecordingUDPClient) -> None:
+    result = set_patch_text(56, 1, "Bar C")
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/set/patch/56/text1", "Bar C")]
+
+
+def test_set_patch_gel_targets_the_gel_field(sent: RecordingUDPClient) -> None:
+    result = set_patch_gel(1, "L201")
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/set/patch/1/gel", "L201")]
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "two\nlines"])
+def test_patch_label_rejects_empty_and_multiline(sent: RecordingUDPClient, bad: str) -> None:
+    """A blank label is a mistake, and a newline would be truncated silently."""
+    result = set_patch_label(1, bad)
+    assert result["ok"] is False
+    assert sent.messages == []
+
+
+# --- Loading faders ------------------------------------------------------
+
+
+def test_load_to_fader_sends_target_then_load(sent: RecordingUDPClient) -> None:
+    """Assignment is command-line target followed by the Load button.
+
+    "Fader 6 Sub 5" is a syntax error on the console; this two-step is the
+    only way, and the order matters.
+    """
+    from eos_mcp.tools.faders import load_to_fader
+
+    result = load_to_fader(1, 6, "Sub 5")
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/newcmd", "Sub 5"), ("/eos/fader/1/6/load", [])]
+
+
+def test_load_to_fader_leaves_the_target_unterminated(sent: RecordingUDPClient) -> None:
+    """Appending Enter would execute the target instead of loading it."""
+    from eos_mcp.tools.faders import load_to_fader
+
+    load_to_fader(1, 6, "Color_Palette 2")
+    assert sent.messages[0] == ("/eos/newcmd", "Color_Palette 2")
+    assert "Enter" not in str(sent.messages[0][1])
+
+
+def test_load_to_fader_rejects_an_empty_target(sent: RecordingUDPClient) -> None:
+    from eos_mcp.tools.faders import load_to_fader
+
+    result = load_to_fader(1, 6, "   ")
+    assert result["ok"] is False
+    assert sent.messages == []

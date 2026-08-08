@@ -8,19 +8,32 @@ yet, which is deliberately distinct from a real value.
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import time
+from pathlib import PurePosixPath
 
 from ..app import mcp
 from ..config import config
 from ..osc.client import client
 from ..osc.listener import listener
 from ..state import snapshot, state, state_lock
-from ._common import BankIndex, ToolResult, guarded, success
+from ._common import BankIndex, TargetNumber, ToolResult, guarded, success
 
 #: How long `sync_state` waits for the console to answer.
-SYNC_TIMEOUT = 1.5
+#:
+#: 1.5s was too short against a real console: Eos was replying, but late, so
+#: sync_state reported failure while enumeration - which waits longer - worked
+#: first time. A sync that gives up early is worse than a slow one, because it
+#: reports a working link as dead.
+SYNC_TIMEOUT = 4.0
 #: How often it re-checks while waiting.
 SYNC_POLL_INTERVAL = 0.05
+
+#: Size of the fader and direct select banks sync_state creates. Ten covers a
+#: standard console fader page; configure_fader_bank overrides it.
+DEFAULT_FADER_COUNT = 10
+DEFAULT_DS_COUNT = 10
 
 
 def _age(last_update: float | None) -> float | None:
@@ -28,6 +41,68 @@ def _age(last_update: float | None) -> float | None:
     if last_update is None:
         return None
     return round(time.monotonic() - last_update, 3)
+
+
+def _name_from_path(show_path: str | None) -> str | None:
+    """Derive a show name from its file path, dropping directories and suffix."""
+    if not show_path:
+        return None
+    name = PurePosixPath(show_path.replace("\\", "/")).name
+    return name.rsplit(".", 1)[0] or None
+
+
+def _local_address() -> str | None:
+    """This machine's outbound IPv4 address, or ``None`` if it cannot be found.
+
+    Used to tell the user the exact value to type into the console rather than
+    "use your LAN address". Opening a UDP socket to an unroutable address makes
+    the OS pick the interface it would send from; nothing is transmitted.
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # TEST-NET-1 (RFC 5737). Reserved for documentation, never routed.
+            sock.connect(("192.0.2.1", 9))
+            address = str(sock.getsockname()[0])
+        finally:
+            sock.close()
+    except OSError:
+        return None
+    return None if address.startswith("127.") else address
+
+
+def _tx_address_hint() -> str:
+    """Name the address the console should transmit to, if it can be determined."""
+    address = _local_address()
+    if not address:
+        return ""
+    return f" This machine is currently {address}, so that is the value to enter."
+
+
+def _sender_is_console(last_sender: str | None) -> bool:
+    """Whether the last datagram came from the address commands are sent to."""
+    if not last_sender:
+        return False
+    return last_sender.rsplit(":", 1)[0] == config.eos_ip
+
+
+def _sender_note() -> str:
+    """Explain the benign case where sender and console address legitimately differ.
+
+    With Eos on this machine, commands are addressed to loopback while Eos
+    transmits from its LAN interface - because it does not bind loopback for
+    transmit. The two addresses then never match, and that is correct.
+    """
+    try:
+        console_is_local = ipaddress.ip_address(config.eos_ip).is_loopback
+    except ValueError:
+        return ""
+    if not console_is_local:
+        return ""
+    return (
+        " Note: with EOS_IP set to loopback and Eos on this machine, its replies "
+        "arrive from the LAN interface, so a differing address here is expected."
+    )
 
 
 @mcp.tool()
@@ -210,22 +285,51 @@ def get_connection_health() -> ToolResult:
     Call this first when a query says it has no data - it distinguishes "the
     console has not been asked yet" from "the listener never bound" or "the
     console is not sending".
+
+    If the listener is down, this retries the bind before reporting. The port
+    is usually held by another instance of this server, so the bind can start
+    succeeding long after startup - without a retry the listener would stay
+    dead for the life of the process even once the port was free.
     """
+    rebound = False
+    if not listener.is_running:
+        rebound = listener.start()
+
     s = snapshot()
     age = _age(s.last_update)
 
     if listener.bind_error:
         detail = f"OSC listener is NOT running: {listener.bind_error}"
+    elif rebound:
+        detail = (
+            f"OSC listener was down and has just rebound to {listener.bound_address}. "
+            "Call sync_state to repopulate console state."
+        )
     elif not listener.is_running:
         detail = "OSC listener has not been started."
     elif age is None:
         detail = (
             f"Listening on {listener.bound_address} but the console has sent nothing yet. "
-            "Call sync_state. If it stays silent, check OSC TX is enabled on the console "
-            f"and that its OSC UDP TX Port matches {config.port_rx}."
+            "Call sync_state. If it stays silent, the console is not transmitting, and "
+            "only a human at the console can fix it - these are show-file settings under "
+            "Setup > System > Show Control > OSC, not something this server can change. "
+            "Ask the user to check, in this order: (1) OSC UDP TX IP Address is the LAN "
+            "address of the machine running this server, and NOT 127.0.0.1 - Eos does "
+            "not bind its transmit socket to loopback, so a loopback address sends to "
+            "nobody even on a single machine, while TX still reads as enabled and "
+            f"commands still land.{_tx_address_hint()} Then (2) OSC TX is enabled; "
+            f"(3) OSC UDP TX Port matches {config.port_rx}. Note this address changes "
+            "when the machine joins a different network, and these are show-file "
+            "settings, so loading or reloading a show reverts them."
         )
+    elif _sender_is_console(s.last_sender):
+        detail = f"Healthy. Last OSC message from the console ({s.last_sender}) {age:.1f}s ago."
     else:
-        detail = f"Healthy. Last OSC message from the console {age:.1f}s ago."
+        detail = (
+            f"Last OSC message came from {s.last_sender} {age:.1f}s ago, which is not the "
+            f"configured console address {config.eos_ip}. Any process can send to this "
+            f"port, so traffic alone is not proof the console is reachable.{_sender_note()}"
+        )
 
     return success(
         "get_connection_health",
@@ -235,7 +339,121 @@ def get_connection_health() -> ToolResult:
         bind_error=listener.bind_error,
         command_target=client.target,
         seconds_since_last_message=age,
+        last_sender=s.last_sender,
         has_data=s.has_data,
+    )
+
+
+@mcp.tool()
+@guarded("get_channel_parameters")
+def get_channel_parameters(channel: TargetNumber) -> ToolResult:
+    """Reports what a channel is currently doing - every live parameter value.
+
+    This is the only way to see actual output. Enumeration says what has been
+    *assigned* to a channel; this says what the channel is doing as a result,
+    which is how you tell a running effect from one that was recorded and does
+    nothing.
+
+    Selecting the channel is how Eos is asked, so this changes the console's
+    current selection as a side effect.
+
+    Args:
+        channel: The channel to inspect.
+    """
+    with state_lock:
+        before_seq = state.wheels_seq
+        state.wheels.clear()
+
+    client.send(f"/eos/chan/{channel}")
+
+    deadline = time.monotonic() + SYNC_TIMEOUT
+    while time.monotonic() < deadline:
+        with state_lock:
+            if state.wheels_seq != before_seq and state.wheels:
+                break
+        time.sleep(SYNC_POLL_INTERVAL)
+
+    s = snapshot()
+    if not s.wheels:
+        return success(
+            "get_channel_parameters",
+            f"Selected channel {channel} but the console reported no parameters within "
+            f"{SYNC_TIMEOUT}s. Check get_connection_health - this says nothing about "
+            "what the channel is doing.",
+            channel=channel,
+            known=False,
+            parameters=[],
+        )
+
+    parameters = [
+        {"name": w.name, "level": w.level, "group": w.group}
+        for _, w in sorted(s.wheels.items())
+        if w.name
+    ]
+    summary = ", ".join(f"{p['name']} {p['level']:g}" for p in parameters)
+    return success(
+        "get_channel_parameters",
+        f"Channel {channel}: {summary}",
+        channel=channel,
+        known=True,
+        selection=s.active_channels,
+        parameters=parameters,
+    )
+
+
+@mcp.tool()
+@guarded("get_show_info")
+def get_show_info() -> ToolResult:
+    """Reports which show is loaded, where it lives, and the Eos version.
+
+    Worth checking before auditing or writing anything. A console can hold a
+    different show than the one you have open on disk, and every conclusion
+    drawn from the wrong show is wrong.
+    """
+    client.send("/eos/get/show/path")
+    client.send("/eos/get/version")
+
+    deadline = time.monotonic() + SYNC_TIMEOUT
+    while time.monotonic() < deadline:
+        s = snapshot()
+        if s.show_name is not None or s.show_path is not None:
+            break
+        time.sleep(SYNC_POLL_INTERVAL)
+
+    s = snapshot()
+    if s.show_name is None and s.show_path is None:
+        return success(
+            "get_show_info",
+            f"The console did not report a show within {SYNC_TIMEOUT}s. Check "
+            "get_connection_health - do not assume which show is loaded.",
+            known=False,
+            show_name=None,
+            show_path=None,
+            eos_version=s.eos_version,
+        )
+
+    # Eos does not always push /eos/out/show/name, but the path carries the
+    # same name. Reporting "unnamed" while holding the filename is unhelpful.
+    name = s.show_name or _name_from_path(s.show_path)
+
+    detail = f"Show: {name or 'unnamed'}"
+    if s.show_path:
+        detail += f" ({s.show_path})"
+    detail += (
+        ". Whether there are unsaved changes cannot be read over OSC - assume there are, "
+        "and note that show-file settings, including OSC transmit, are lost on restart "
+        "if the show has not been saved since they were set."
+    )
+
+    return success(
+        "get_show_info",
+        detail,
+        known=True,
+        show_name=name,
+        show_name_reported_by_console=s.show_name,
+        show_path=s.show_path,
+        last_save_seen=s.show_saved,
+        eos_version=s.eos_version,
     )
 
 
@@ -256,11 +474,17 @@ def sync_state() -> ToolResult:
         "/eos/get/version",
         "/eos/get/cmd",
         "/eos/get/setup",
-        # Ask the console to publish its fader banks and direct selects.
-        "/eos/fader/0/config",
-        "/eos/fader/1/config",
-        "/eos/ds/1/config",
+        # Fader and direct select banks must be *created* before Eos sends any
+        # labels or levels for them - the count is not optional. Requesting
+        # ".../config" with no count creates nothing, so these stayed empty.
+        f"/eos/fader/1/config/{DEFAULT_FADER_COUNT}",
+        f"/eos/ds/1/config/sub/{DEFAULT_DS_COUNT}",
     ]
+    # Without this, Eos answers one-shot requests but never pushes anything
+    # else - selection, live/blind and fader config all stay empty no matter
+    # how often they are asked for. It must be sent before the requests below
+    # so their replies are not the only thing we ever hear.
+    client.send("/eos/subscribe", 1)
     for address in requests:
         client.send(address)
 
@@ -276,16 +500,20 @@ def sync_state() -> ToolResult:
         time.sleep(SYNC_POLL_INTERVAL)
 
     if responded:
+        elapsed = round(time.monotonic() - (deadline - SYNC_TIMEOUT), 2)
         return success(
             "sync_state",
-            "Synchronisation complete - the console responded and state is populated.",
+            f"Synchronisation complete - the console responded in {elapsed}s and state "
+            "is populated.",
             responded=True,
+            seconds_to_respond=elapsed,
             requests_sent=len(requests),
         )
     return success(
         "sync_state",
         f"Sent {len(requests)} requests to {client.target} but the console did not reply "
-        f"within {SYNC_TIMEOUT}s. It may be unreachable or OSC TX may be disabled. "
+        f"within {SYNC_TIMEOUT}s. It may be unreachable, OSC TX may be disabled, or the "
+        "console's OSC UDP TX IP Address may be blank or pointing at another machine. "
         "Call get_connection_health for details, and do not trust state until it responds.",
         responded=False,
         requests_sent=len(requests),

@@ -8,6 +8,7 @@ import pytest
 
 from eos_mcp.osc.client import client
 from eos_mcp.state import reset_state
+from eos_mcp.tools import levels
 
 
 class RecordingUDPClient:
@@ -27,6 +28,17 @@ class RecordingUDPClient:
 def clean_state() -> None:
     """Every test starts with an empty console state."""
     reset_state()
+
+
+@pytest.fixture(autouse=True)
+def fast_confirm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shorten the command-line confirmation wait.
+
+    No test has a console echoing back, so every ``command_line`` call would
+    otherwise sit out the full timeout. Tests that assert on the unconfirmed
+    path still exercise it, just quickly.
+    """
+    monkeypatch.setattr(levels, "CONFIRM_TIMEOUT", 0.01)
 
 
 @pytest.fixture

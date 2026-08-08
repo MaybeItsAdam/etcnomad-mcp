@@ -34,6 +34,38 @@ class DirectSelectBank:
 
 
 @dataclass
+class Wheel:
+    """One encoder wheel: a live parameter of the current selection.
+
+    Eos publishes these whenever the selection changes, which makes them the
+    only way to read what a channel is actually *doing* - its pan, tilt and
+    colour - rather than what has been assigned to it.
+    """
+
+    name: str = ""
+    group: int = 0
+    level: float = 0.0
+
+
+@dataclass
+class ShowTarget:
+    """One numbered record in the show - a sub, effect, group, cue, and so on.
+
+    ``number`` stays a string because Eos target numbers are not integers: cues
+    can be ``1.5``, and patch entries carry a part as ``30/2``.
+    """
+
+    target_type: str
+    number: str
+    label: str = ""
+    uid: str = ""
+    #: Type-specific fields decoded from the reply, e.g. a patch entry's
+    #: manufacturer, model and address. Empty for types with nothing beyond
+    #: a label.
+    extra: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
 class EosState:
     """Everything the console has told us so far.
 
@@ -52,14 +84,40 @@ class EosState:
     pending_cue_text: str = ""
     live_blind_state: int | None = None
     command_line: str = ""
+    #: Increments on every command line echo, including ones whose text is
+    #: identical to the last. Text comparison cannot tell "the console did not
+    #: reply" from "the console replied with the same thing".
+    command_line_seq: int = 0
     active_channels: str = ""
     faders: dict[int, FaderBank] = field(default_factory=dict)
     direct_selects: dict[int, DirectSelectBank] = field(default_factory=dict)
     wheel_mode: object | None = None
+    #: Encoder wheels for the current selection, keyed by wheel index.
+    wheels: dict[int, Wheel] = field(default_factory=dict)
+    #: Bumped whenever a wheel is reported, so a caller can tell a fresh set
+    #: from the previous selection's leftovers.
+    wheels_seq: int = 0
     pantilt: list[float] = field(default_factory=list)
     xyz: list[float] = field(default_factory=list)
+    #: Which show is loaded. Without this there is no way to tell whether the
+    #: console holds the show you think it does - and auditing or writing to
+    #: the wrong show is worse than doing nothing.
+    show_name: str | None = None
+    show_path: str | None = None
+    #: ``True`` once Eos reports a save. Show-file settings, including OSC
+    #: transmit, are lost on restart if the show was never saved.
+    show_saved: bool | None = None
+    eos_version: str | None = None
+    #: How many records Eos says exist, keyed by target type ("sub", "fx", ...).
+    target_counts: dict[str, int] = field(default_factory=dict)
+    #: Collected records, keyed by target type then target number.
+    show_targets: dict[str, dict[str, ShowTarget]] = field(default_factory=dict)
     #: ``time.monotonic()`` of the most recent OSC message that changed state.
     last_update: float | None = None
+    #: ``host:port`` of whoever sent the most recent datagram. Any process on
+    #: the machine can send to the listener, so liveness alone does not mean
+    #: the console is talking to us.
+    last_sender: str | None = None
 
     @property
     def live_blind_label(self) -> str:

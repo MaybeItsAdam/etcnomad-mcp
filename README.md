@@ -44,8 +44,8 @@ eos_mcp/
 ## Prerequisites
 
 - An Eos family console or ETCnomad
-- Python 3.10+
-- [`uv`](https://docs.astral.sh/uv/) (or pip)
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) — no separate Python install
+  or clone needed; `uv` fetches Python and the server itself.
 
 ## Setup
 
@@ -57,42 +57,51 @@ Browser → Setup → System Settings → System → Show Control → OSC:
 | OSC RX | Enabled |
 | OSC TX | Enabled |
 | OSC UDP RX Port | `8000` |
-| OSC UDP TX Port | `9001` |
+| OSC UDP TX Port | `8001` |
+| OSC UDP TX IP Address | the machine's **LAN IP** — *not* `127.0.0.1` |
 
 `OSC UDP RX Port` must match this server's `EOS_PORT_TX`, and `OSC UDP TX Port` must match its
 `EOS_PORT_RX`. They are named from the console's point of view, so they look crossed over.
 
-**2. Install.**
+**`OSC UDP TX IP Address` must be a real interface address, never `127.0.0.1`.** Eos does not
+bind its transmit socket to loopback, so a loopback address there silently sends to nobody —
+even when the console *and* this server are the same machine. Use the machine's LAN IP
+(`ipconfig getifaddr en0` on macOS, `ipconfig` on Windows). Receiving is unaffected: this
+server binds `0.0.0.0`, and commands sent *to* Eos on `127.0.0.1` work normally.
 
-```bash
-uv sync
-```
+This asymmetry is the single most common setup failure, and it looks like a working setup:
+Eos reports TX as enabled, commands land, and every query stays empty.
 
-**3. Run.**
+These are **show file** settings, not console-wide ones. Loading a different show — an incoming
+company's file, for instance — reverts them, and they have to be set again.
 
-```bash
-uv run eos_server.py     # or, once installed: eos-mcp
-```
+**2. Add it to your MCP client.**
 
-## Connecting a client
-
-For Claude Desktop, add this to `claude_desktop_config.json`:
+For Claude Desktop, add this to `claude_desktop_config.json`
+(Settings → Developer → Edit Config):
 
 ```json
 {
   "mcpServers": {
     "eos": {
-      "command": "uv",
-      "args": ["--directory", "/absolute/path/to/eos-mcp", "run", "eos_server.py"],
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/MaybeItsAdam/eos-mcp", "eos-mcp"],
       "env": {
         "EOS_IP": "127.0.0.1",
         "EOS_PORT_TX": "8000",
-        "EOS_PORT_RX": "9001"
+        "EOS_PORT_RX": "8001"
       }
     }
   }
 }
 ```
+
+`uvx` fetches and caches the server straight from GitHub on first launch — nothing to clone or
+install by hand. Restart Claude Desktop after editing the config. Any MCP client that launches a
+command works the same way; drop the `command`/`args`/`env` above into its config format.
+
+To pin to a specific commit instead of tracking `main`, append `@<commit-sha>` to the repo URL,
+e.g. `"git+https://github.com/MaybeItsAdam/eos-mcp@<sha>"`.
 
 The server also publishes a `system_instructions` prompt covering how to sync state and when
 to confirm before acting.
@@ -105,7 +114,7 @@ All optional. Defaults suit ETCnomad running on the same machine.
 | --- | --- | --- |
 | `EOS_IP` | `127.0.0.1` | Console address to send commands to. |
 | `EOS_PORT_TX` | `8000` | Port commands are sent to. Match the console's **OSC UDP RX Port**. |
-| `EOS_PORT_RX` | `9001` | Port status is received on. Match the console's **OSC UDP TX Port**. |
+| `EOS_PORT_RX` | `8001` | Port status is received on. Match the console's **OSC UDP TX Port**. |
 | `EOS_RX_HOST` | `0.0.0.0` | Local interface the listener binds to. |
 | `EOS_LOG_LEVEL` | `INFO` | `DEBUG` logs every OSC message sent and received. |
 
@@ -116,7 +125,19 @@ Invalid values are rejected at startup with a message naming the variable.
 Every tool returns a structured result with an `ok` field. `ok: false` means the command never
 reached the console, and `error` says why — check it rather than assuming success.
 
-**Diagnostics** — `get_connection_health`, `sync_state`
+**Diagnostics** — `get_connection_health`, `sync_state`, `get_show_info`,
+`get_channel_parameters`
+
+`get_channel_parameters` reports what a channel is *doing* — every live parameter
+value — as opposed to what has been assigned to it. It is how you tell a running
+effect from one that was recorded and does nothing. Eos has undo, covering Record,
+Update and Delete: `press_key("undo")`.
+
+**Show data** — `list_show_targets`, `get_show_inventory`, `audit_show`
+
+Enumeration answers "what already exists?". Eos replaces an occupied target
+without warning and offers no undo, so check before recording. `audit_show` reports
+duplicate labels, labels differing only by case, and unlabelled targets.
 
 **Status** — `get_active_cue`, `get_pending_cue`, `get_live_blind_state`, `get_command_line`,
 `get_selection`, `get_faders`, `get_direct_selects`, `get_system_state`
@@ -135,7 +156,16 @@ operations)
 **Colour and position** — `set_color_rgb`, `set_color_hs`, `set_color_xy`, `set_pan_tilt`,
 `set_xyz`
 
-**Faders and direct selects** — `set_fader`, `control_fader_button`, `press_direct_select`
+**Faders and direct selects** — `configure_fader_bank`, `configure_direct_selects`,
+`load_to_fader`, `set_fader`, `control_fader_button`, `press_direct_select`
+
+Assigning a target to a fader is not command line syntax — `Fader 6 Sub 5` is a
+syntax error. Eos loads a fader by putting the target on the command line and pressing
+that fader's Load button, which is what `load_to_fader` sends.
+
+A bank must be *created* before Eos sends any labels or levels for it, so
+`get_faders` and `get_direct_selects` stay empty until `configure_fader_bank` /
+`configure_direct_selects` has been called. `sync_state` creates a default bank of ten.
 
 **Presets** — `fire_preset`, `fire_palette`, `recall_snapshot`, `bump_sub`
 
@@ -154,8 +184,24 @@ rejected before it reaches the console.
 Start with `get_connection_health` — it distinguishes the failure modes below.
 
 **Queries say "no data reported yet".** Nothing has been requested. Call `sync_state`. If it
-reports no reply, the console is not sending: check OSC **TX** is enabled, and that its OSC UDP
-TX Port equals `EOS_PORT_RX`.
+reports no reply, the console is not sending. Check, in this order:
+
+1. **OSC UDP TX IP Address** is the machine running this server (`127.0.0.1` if that is the
+   console). Blank or stale is the usual culprit — Eos shows TX as enabled and transmits to
+   nobody, so the console's own settings screen looks correct.
+2. **OSC TX** is enabled.
+3. **OSC UDP TX Port** equals `EOS_PORT_RX`.
+
+The two directions are independent, and the failure is asymmetric: commands still land, so the
+console visibly responds while every query stays empty. To tell a wrong port from silence
+altogether, listen on the port directly — nothing arriving on any port means TX is off or
+misdirected, rather than mismatched:
+
+```bash
+nc -ulp 8001      # or: python3 -c "import socket;s=socket.socket(2,2);s.bind(('',8001));print(s.recvfrom(9999))"
+```
+
+Because these live in the show file, loading a different show silently reverts them.
 
 **`get_connection_health` reports a bind error.** Another process holds `EOS_PORT_RX`, often a
 second copy of this server. Stop it, or set `EOS_PORT_RX` to a free port and change the
@@ -179,12 +225,18 @@ your MCP client may hide them.
 ## Development
 
 ```bash
+git clone https://github.com/MaybeItsAdam/eos-mcp
+cd eos-mcp
 uv sync --all-groups
 uv run pytest          # test suite; no console required
 uv run ruff check .
 uv run ruff format .
 uv run mypy
 ```
+
+To point a client at your local checkout instead of GitHub, use
+`"command": "uv", "args": ["--directory", "/absolute/path/to/eos-mcp", "run", "eos_server.py"]`
+in place of the `uvx` block above.
 
 The tests build genuine OSC datagrams and run them through the real python-osc dispatcher, and
 the integration tests bind a listener on an ephemeral port, so the receive path is covered

@@ -20,12 +20,14 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 from pythonosc import dispatcher, osc_server
 
 from ..config import EosConfig, config
+from ..errors import EosError
 from ..logging_setup import get_logger
-from ..state import DirectSelectBank, Fader, FaderBank, state, state_lock
+from ..state import DirectSelectBank, Fader, FaderBank, ShowTarget, Wheel, state, state_lock
 
 logger = get_logger(__name__)
 
@@ -38,8 +40,36 @@ RE_PENDING_CUE = re.compile(rf"/eos/out/pending/cue/(?P<list>\d+)/(?P<cue>{_CUE}
 RE_FADER_BANK = re.compile(r"/eos/out/fader/(?P<bank>\d+)")
 RE_FADER_LEVEL = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)")
 RE_FADER_NAME = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)/name")
+RE_ACTIVE_WHEEL = re.compile(r"/eos/out/active/wheel/(?P<index>\d+)")
 RE_DS_BANK = re.compile(r"/eos/out/ds/(?P<bank>\d+)")
 RE_DS_BUTTON = re.compile(r"/eos/out/ds/(?P<bank>\d+)/(?P<button>\d+)")
+
+# Replies to /eos/get/<type>/count. Cues nest under a list number
+# (/eos/out/get/cue/1/count), so the middle segment is optional.
+RE_GET_COUNT = re.compile(r"/eos/out/get/(?P<type>[a-z0-9]+)(?:/(?P<scope>[\d.]+))?/count")
+
+# Replies to /eos/get/<type>/index/<n>. Everything between the type and "/list/"
+# identifies the target, and its shape varies per type: a sub is "5", a cue is
+# "1/2.5/0", a patch entry is "30/1". Capturing it whole keeps one handler
+# correct for all of them rather than needing a regex per target type.
+RE_GET_DETAIL = re.compile(
+    r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/list/(?P<index>\d+)/(?P<count>\d+)"
+)
+
+# The contents of a target, rather than its properties. Eos puts these on a
+# named sub-address - /eos/out/get/group/5/channels/list/... - which the detail
+# regex rejects because the segment is not numeric. Dropping them meant a
+# submaster or palette could be listed but never looked inside.
+RE_GET_CONTENTS = re.compile(
+    r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/(?P<part>channels|fx)"
+    r"/list/(?P<index>\d+)/(?P<count>\d+)"
+)
+
+# Eos announcing that show data of a type has changed. Cue notifications carry
+# their list number, which is dropped: the whole type is re-read either way.
+RE_NOTIFY = re.compile(
+    r"/eos/out/notify/(?P<type>[a-z0-9]+)(?:/[\d.]+)?/list/(?P<index>\d+)/(?P<count>\d+)"
+)
 
 
 #: Signature every OSC handler in this module shares.
@@ -136,6 +166,10 @@ def handle_command_line(address: str, *args: object) -> None:
         return
     with state_lock:
         state.command_line = str(args[0])
+        # Bumped even when the text is unchanged. Callers wait for the console
+        # to echo *something*, and re-sending an identical command produces an
+        # identical line - comparing text would read that as no reply at all.
+        state.command_line_seq += 1
         _mark_update()
 
 
@@ -244,6 +278,211 @@ def handle_xyz(address: str, *args: object) -> None:
 
 
 @_guard
+def handle_get_count(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>[/<scope>]/count (uint32 argument)."""
+    m = RE_GET_COUNT.fullmatch(address)
+    if not m or not args or not isinstance(args[0], (int, float)):
+        return
+    key = m.group("type")
+    if m.group("scope") is not None:
+        key = f"{key}/{m.group('scope')}"
+    with state_lock:
+        state.target_counts[key] = int(args[0])
+        _mark_update()
+
+
+#: Extra arguments worth keeping, by target type, as ``{argument index: name}``.
+#: Argument 0 is always the list index, 1 the UID and 2 the label, so these
+#: start at 3. Patch is the one that matters: without the manufacturer and
+#: model there is no way to tell a dimmer from a moving light, which is the
+#: difference between an effect that works and one that cannot.
+DETAIL_FIELDS: dict[str, dict[int, str]] = {
+    "patch": {3: "manufacturer", 4: "model", 5: "address", 7: "level", 8: "gel"},
+    "sub": {3: "mode", 4: "fader_mode"},
+    # Without these an effect can be listed but not described, so "make the
+    # ballyhoo slower" would mean editing a rate nobody can read first.
+    "fx": {3: "effect_type", 4: "entry", 5: "exit", 6: "duration", 7: "scale"},
+}
+
+
+def _extra_fields(target_type: str, args: tuple[object, ...]) -> dict[str, object]:
+    """Pull the type-specific arguments out of a detail reply."""
+    fields = DETAIL_FIELDS.get(target_type)
+    if not fields:
+        return {}
+    found: dict[str, object] = {}
+    for index, name in fields.items():
+        if index < len(args) and args[index] not in ("", None):
+            found[name] = args[index]
+    return found
+
+
+@_guard
+def handle_get_detail(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>/<target>/list/<index>/<count>.
+
+    Eos sends the record in several packets; only the first carries the label,
+    so a later packet must not overwrite a label already captured. Arguments are
+    positional: 0 is the list index, 1 the UID, 2 the label.
+    """
+    m = RE_GET_DETAIL.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    number = m.group("target").rstrip("/")
+    uid = str(args[1]) if len(args) > 1 and isinstance(args[1], str) else ""
+    label = str(args[2]) if len(args) > 2 and isinstance(args[2], str) else ""
+    extra = _extra_fields(target_type, args)
+
+    with state_lock:
+        bucket = state.show_targets.setdefault(target_type, {})
+        record = bucket.get(number)
+        if record is None:
+            bucket[number] = ShowTarget(target_type, number, label, uid, extra)
+        else:
+            # Later packets of the same record carry no label; keep the first.
+            record.label = record.label or label
+            record.uid = record.uid or uid
+            record.extra.update(extra)
+        _mark_update()
+
+
+@_guard
+def handle_get_contents(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>/<target>/{channels,fx}/list/<index>/<count>.
+
+    Arguments after the UID are an OSC number list - the channels a group or
+    palette covers, or the effects a submaster runs. Kept as text because Eos
+    sends ranges ("1-5") as readily as single numbers, and reformatting them
+    loses the console's own grouping.
+    """
+    m = RE_GET_CONTENTS.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    number = m.group("target").rstrip("/")
+    part = m.group("part")
+    values = [str(a) for a in args[2:] if a not in ("", None)]
+    if not values:
+        return
+
+    with state_lock:
+        bucket = state.show_targets.setdefault(target_type, {})
+        record = bucket.get(number)
+        if record is None:
+            record = ShowTarget(target_type, number)
+            bucket[number] = record
+        existing = str(record.extra.get(part, ""))
+        merged = [v for v in existing.split(" ") if v] + values
+        record.extra[part] = " ".join(merged)
+        _mark_update()
+
+
+@_guard
+def handle_active_wheel(address: str, *args: object) -> None:
+    """Handles /eos/out/active/wheel/<index> = "<name> [<level>]", <group>, <level>.
+
+    The name arrives with its level embedded - "Pan [45]" - so the text before
+    the bracket is the parameter name and the float argument is authoritative
+    for the value.
+    """
+    m = RE_ACTIVE_WHEEL.fullmatch(address)
+    if not m or not args:
+        return
+    index = int(m.group("index"))
+    raw_name = str(args[0]) if isinstance(args[0], str) else ""
+    name = raw_name.split("[")[0].strip()
+    group = int(args[1]) if len(args) > 1 and isinstance(args[1], (int, float)) else 0
+    level = float(args[2]) if len(args) > 2 and isinstance(args[2], (int, float)) else 0.0
+
+    with state_lock:
+        state.wheels[index] = Wheel(name=name, group=group, level=level)
+        state.wheels_seq += 1
+        _mark_update()
+
+
+@_guard
+def handle_show_loaded(address: str, *args: object) -> None:
+    """Handles /eos/out/event/show/loaded and .../cleared.
+
+    A different show means every cached record describes a show that is no
+    longer open. Per-type notifications do not cover this: they fire when data
+    of that type changes, not when the whole show is swapped. Leaving the cache
+    in place would let "is sub 5 free?" be answered from the previous show and
+    overwrite something.
+    """
+    with state_lock:
+        state.show_targets.clear()
+        state.target_counts.clear()
+        state.show_name = None
+        state.show_path = None
+        state.show_saved = None
+        state.wheels.clear()
+        _mark_update()
+    logger.info("Show %s; dropped all cached show data", address.rsplit("/", 1)[-1])
+
+
+@_guard
+def handle_show_name(address: str, *args: object) -> None:
+    """Handles /eos/out/show/name."""
+    if not args:
+        return
+    with state_lock:
+        state.show_name = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_show_path(address: str, *args: object) -> None:
+    """Handles /eos/out/get/show/path."""
+    if not args:
+        return
+    with state_lock:
+        state.show_path = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_show_saved(address: str, *args: object) -> None:
+    """Handles /eos/out/event/show/saved."""
+    with state_lock:
+        state.show_saved = True
+        _mark_update()
+
+
+@_guard
+def handle_version(address: str, *args: object) -> None:
+    """Handles /eos/out/get/version."""
+    if not args:
+        return
+    with state_lock:
+        state.eos_version = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_notify(address: str, *args: object) -> None:
+    """Handles /eos/out/notify/<type>/list/<index>/<count>.
+
+    Eos sends this when show data of that type changes. The cached enumeration
+    is now stale, and stale data here is dangerous rather than merely old: a
+    caller checking whether sub 5 is free would get an answer describing the
+    show as it was, and overwrite something. Dropping the cache forces the next
+    read to go back to the console.
+    """
+    m = RE_NOTIFY.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    with state_lock:
+        state.show_targets.pop(target_type, None)
+        for key in [k for k in state.target_counts if k.split("/")[0] == target_type]:
+            del state.target_counts[key]
+        _mark_update()
+    logger.debug("Show data changed for %s; dropped cached enumeration", target_type)
+
+
+@_guard
 def default_handler(address: str, *args: object) -> None:
     """Records liveness for messages we do not model, and logs them at DEBUG."""
     with state_lock:
@@ -275,8 +514,42 @@ def build_dispatcher() -> dispatcher.Dispatcher:
     disp.map("/eos/out/ds/*", handle_ds_bank_label)
     disp.map("/eos/out/ds/*/*", handle_ds_button_label)
 
+    # python-osc's "*" crosses "/", so one pattern reaches every depth these
+    # replies use; each handler re-checks with its anchored regex.
+    disp.map("/eos/out/active/wheel/*", handle_active_wheel)
+
+    disp.map("/eos/out/show/name", handle_show_name)
+    disp.map("/eos/out/get/show/path", handle_show_path)
+    disp.map("/eos/out/event/show/saved", handle_show_saved)
+    disp.map("/eos/out/event/show/loaded", handle_show_loaded)
+    disp.map("/eos/out/event/show/cleared", handle_show_loaded)
+    disp.map("/eos/out/get/version", handle_version)
+
+    disp.map("/eos/out/get/*", handle_get_count)
+    disp.map("/eos/out/get/*", handle_get_detail)
+    disp.map("/eos/out/get/*", handle_get_contents)
+    disp.map("/eos/out/notify/*", handle_notify)
+
     disp.set_default_handler(default_handler)
     return disp
+
+
+class RecordingOSCUDPServer(osc_server.ThreadingOSCUDPServer):
+    """An OSC server that records who sent each datagram.
+
+    Without this the server knows only that *something* arrived on the port.
+    Any local process can send there, so "we received a packet" was being
+    reported as "the console is healthy" - which is exactly backwards for a
+    tool whose job is telling you whether the console is reachable.
+
+    ``verify_request`` runs for every datagram regardless of which handler
+    ends up matching, so recording here cannot miss one.
+    """
+
+    def verify_request(self, request: Any, client_address: Any) -> bool:
+        with state_lock:
+            state.last_sender = f"{client_address[0]}:{client_address[1]}"
+        return True
 
 
 class OscListener:
@@ -323,7 +596,7 @@ class OscListener:
             return True
 
         try:
-            self._server = osc_server.ThreadingOSCUDPServer(
+            self._server = RecordingOSCUDPServer(
                 (self._config.rx_host, self._config.port_rx), build_dispatcher()
             )
         except OSError as exc:
@@ -340,7 +613,26 @@ class OscListener:
         self._thread = threading.Thread(target=self._serve, name="eos-osc-listener", daemon=True)
         self._thread.start()
         logger.info("OSC listener bound to %s", self.bound_address)
+        self._subscribe()
         return True
+
+    def _subscribe(self) -> None:
+        """Ask Eos to push show data changes to us.
+
+        Without this Eos answers one-shot requests and pushes nothing else, so
+        selection and live/blind never populate. Doing it on every bind rather
+        than only inside ``sync_state`` means a rebind cannot silently leave the
+        connection half-alive - listening, but deaf to everything unsolicited.
+
+        Failure is logged rather than raised: the listener is up either way, and
+        a send error here should not look like a bind failure.
+        """
+        from .client import client  # Imported late; the client imports config too.
+
+        try:
+            client.send("/eos/subscribe", 1)
+        except EosError as exc:
+            logger.warning("Could not subscribe to console updates: %s", exc)
 
     def _serve(self) -> None:
         assert self._server is not None
