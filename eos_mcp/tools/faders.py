@@ -7,6 +7,7 @@ from typing import Literal
 from ..app import mcp
 from ..errors import EosValidationError
 from ..osc import address as addr
+from ..osc.client import client
 from ._common import (
     BankIndex,
     FaderAction,
@@ -123,6 +124,10 @@ def set_fader(bank: BankIndex, fader: TargetNumber, level: Normalised) -> ToolRe
 def control_fader_button(bank: BankIndex, fader: TargetNumber, action: FaderAction) -> ToolResult:
     """Presses one of the buttons attached to a fader.
 
+    "load" is how a target is assigned to a fader, but it acts on whatever is
+    pending on the command line - use :func:`load_to_fader`, which sends both
+    halves together, rather than driving this by hand.
+
     Args:
         bank: Fader bank index.
         fader: Fader index within the bank.
@@ -133,6 +138,45 @@ def control_fader_button(bank: BankIndex, fader: TargetNumber, action: FaderActi
         f"/eos/fader/{bank}/{fader}/{verb}",
         action="control_fader_button",
         detail=f"Fader {bank}/{fader}: {action}",
+    )
+
+
+@mcp.tool()
+@guarded("load_to_fader")
+def load_to_fader(bank: BankIndex, fader: TargetNumber, target: str) -> ToolResult:
+    """Loads a submaster, cue, preset or palette onto a fader.
+
+    This is how faders are assigned. It is NOT command line syntax: "Fader 6
+    Sub 5" is a syntax error, and so is "Fader 1/6 Sub 5". Eos assigns by
+    putting the target on the command line and then pressing that fader's Load
+    button - ``[Sub] [5] [Load]``. This sends both halves in order.
+
+    The fader bank must exist first; see :func:`configure_fader_bank`. OSC
+    fader <bank>/<n> is the same fader as console fader n, so loading to 1/6
+    loads to console fader 6.
+
+    A fader that already holds something must be unloaded before a new target
+    will take - use ``control_fader_button`` with "unload". Verify with
+    ``get_faders`` afterwards rather than assuming.
+
+    Args:
+        bank: Fader bank index, as created by configure_fader_bank.
+        fader: Fader index within the bank.
+        target: The target to load, in command line form, e.g. "Sub 5",
+            "Color_Palette 2", "Cue 5", "Preset 3".
+    """
+    text = target.strip()
+    if not text:
+        raise EosValidationError("target must not be empty")
+
+    # Deliberately unterminated: the Load button is what commits it. Adding
+    # "Enter" here would execute the target as a command instead.
+    client.send("/eos/newcmd", text)
+    return send(
+        f"/eos/fader/{bank}/{fader}/load",
+        action="load_to_fader",
+        detail=f"Loaded {text} to fader {bank}/{fader}",
+        target=text,
     )
 
 

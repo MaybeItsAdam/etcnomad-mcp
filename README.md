@@ -151,7 +151,11 @@ operations)
 `set_xyz`
 
 **Faders and direct selects** — `configure_fader_bank`, `configure_direct_selects`,
-`set_fader`, `control_fader_button`, `press_direct_select`
+`load_to_fader`, `set_fader`, `control_fader_button`, `press_direct_select`
+
+Assigning a target to a fader is not command line syntax — `Fader 6 Sub 5` is a
+syntax error. Eos loads a fader by putting the target on the command line and pressing
+that fader's Load button, which is what `load_to_fader` sends.
 
 A bank must be *created* before Eos sends any labels or levels for it, so
 `get_faders` and `get_direct_selects` stay empty until `configure_fader_bank` /

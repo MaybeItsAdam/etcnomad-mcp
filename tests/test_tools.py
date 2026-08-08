@@ -264,3 +264,36 @@ def test_patch_label_rejects_empty_and_multiline(sent: RecordingUDPClient, bad: 
     result = set_patch_label(1, bad)
     assert result["ok"] is False
     assert sent.messages == []
+
+
+# --- Loading faders ------------------------------------------------------
+
+
+def test_load_to_fader_sends_target_then_load(sent: RecordingUDPClient) -> None:
+    """Assignment is command-line target followed by the Load button.
+
+    "Fader 6 Sub 5" is a syntax error on the console; this two-step is the
+    only way, and the order matters.
+    """
+    from eos_mcp.tools.faders import load_to_fader
+
+    result = load_to_fader(1, 6, "Sub 5")
+    assert result["ok"] is True
+    assert sent.messages == [("/eos/newcmd", "Sub 5"), ("/eos/fader/1/6/load", [])]
+
+
+def test_load_to_fader_leaves_the_target_unterminated(sent: RecordingUDPClient) -> None:
+    """Appending Enter would execute the target instead of loading it."""
+    from eos_mcp.tools.faders import load_to_fader
+
+    load_to_fader(1, 6, "Color_Palette 2")
+    assert sent.messages[0] == ("/eos/newcmd", "Color_Palette 2")
+    assert "Enter" not in str(sent.messages[0][1])
+
+
+def test_load_to_fader_rejects_an_empty_target(sent: RecordingUDPClient) -> None:
+    from eos_mcp.tools.faders import load_to_fader
+
+    result = load_to_fader(1, 6, "   ")
+    assert result["ok"] is False
+    assert sent.messages == []
