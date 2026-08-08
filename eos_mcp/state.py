@@ -34,6 +34,20 @@ class DirectSelectBank:
 
 
 @dataclass
+class ShowTarget:
+    """One numbered record in the show - a sub, effect, group, cue, and so on.
+
+    ``number`` stays a string because Eos target numbers are not integers: cues
+    can be ``1.5``, and patch entries carry a part as ``30/2``.
+    """
+
+    target_type: str
+    number: str
+    label: str = ""
+    uid: str = ""
+
+
+@dataclass
 class EosState:
     """Everything the console has told us so far.
 
@@ -58,6 +72,10 @@ class EosState:
     wheel_mode: object | None = None
     pantilt: list[float] = field(default_factory=list)
     xyz: list[float] = field(default_factory=list)
+    #: How many records Eos says exist, keyed by target type ("sub", "fx", ...).
+    target_counts: dict[str, int] = field(default_factory=dict)
+    #: Collected records, keyed by target type then target number.
+    show_targets: dict[str, dict[str, ShowTarget]] = field(default_factory=dict)
     #: ``time.monotonic()`` of the most recent OSC message that changed state.
     last_update: float | None = None
 

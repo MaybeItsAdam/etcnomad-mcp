@@ -14,7 +14,7 @@ def test_defaults_when_nothing_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = EosConfig.from_env()
     assert cfg.eos_ip == "127.0.0.1"
     assert cfg.port_tx == 8000
-    assert cfg.port_rx == 9001
+    assert cfg.port_rx == 8001
 
 
 def test_environment_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -45,10 +45,10 @@ def test_blank_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("EOS_PORT_RX", "")
     cfg = EosConfig.from_env()
     assert cfg.eos_ip == "127.0.0.1"
-    assert cfg.port_rx == 9001
+    assert cfg.port_rx == 8001
 
 
 def test_targets_are_human_readable() -> None:
-    cfg = EosConfig(eos_ip="10.0.0.5", port_tx=8000, rx_host="0.0.0.0", port_rx=9001)
+    cfg = EosConfig(eos_ip="10.0.0.5", port_tx=8000, rx_host="0.0.0.0", port_rx=8001)
     assert cfg.tx_target == "10.0.0.5:8000"
-    assert cfg.rx_target == "0.0.0.0:9001"
+    assert cfg.rx_target == "0.0.0.0:8001"

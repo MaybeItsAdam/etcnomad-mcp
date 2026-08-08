@@ -21,20 +21,31 @@ from ._common import (
 
 @mcp.tool()
 @guarded("command_line")
-def command_line(command: str) -> ToolResult:
-    """Types a command into the Eos command line and executes it.
+def command_line(command: str, reset: bool = True) -> ToolResult:
+    """Types a command into the Eos command line.
 
     This is the most powerful tool available - it can express anything the
     console can do, including record and delete operations. Prefer a specific
     tool when one exists.
 
+    The command is only *executed* if it is terminated, either by ending it
+    with "Enter" or with "#". An unterminated command is left pending on the
+    command line, exactly as if it had been typed but not confirmed.
+
     Args:
-        command: The command string, e.g. "Chan 1 At 50" or "Chan 1 Thru 10 Out".
+        command: The command string, e.g. "Chan 1 At 50 Enter".
+        reset: Clear whatever is already on the command line first (the
+            default). Eos otherwise *appends*, so a leftover fragment silently
+            turns the next command into a syntax error - or worse, into a
+            different valid command. Pass ``False`` only to deliberately build
+            a command up across several calls.
     """
     text = command.strip()
     if not text:
         raise EosValidationError("command must not be empty")
-    return send("/eos/cmd", text, action="command_line", detail=f"Sent command: {text}")
+    address = "/eos/newcmd" if reset else "/eos/cmd"
+    how = "Sent command" if reset else "Appended to command line"
+    return send(address, text, action="command_line", detail=f"{how}: {text}")
 
 
 @mcp.tool()

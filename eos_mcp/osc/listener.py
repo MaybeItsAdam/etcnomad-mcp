@@ -25,7 +25,7 @@ from pythonosc import dispatcher, osc_server
 
 from ..config import EosConfig, config
 from ..logging_setup import get_logger
-from ..state import DirectSelectBank, Fader, FaderBank, state, state_lock
+from ..state import DirectSelectBank, Fader, FaderBank, ShowTarget, state, state_lock
 
 logger = get_logger(__name__)
 
@@ -40,6 +40,18 @@ RE_FADER_LEVEL = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)")
 RE_FADER_NAME = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)/name")
 RE_DS_BANK = re.compile(r"/eos/out/ds/(?P<bank>\d+)")
 RE_DS_BUTTON = re.compile(r"/eos/out/ds/(?P<bank>\d+)/(?P<button>\d+)")
+
+# Replies to /eos/get/<type>/count. Cues nest under a list number
+# (/eos/out/get/cue/1/count), so the middle segment is optional.
+RE_GET_COUNT = re.compile(r"/eos/out/get/(?P<type>[a-z0-9]+)(?:/(?P<scope>[\d.]+))?/count")
+
+# Replies to /eos/get/<type>/index/<n>. Everything between the type and "/list/"
+# identifies the target, and its shape varies per type: a sub is "5", a cue is
+# "1/2.5/0", a patch entry is "30/1". Capturing it whole keeps one handler
+# correct for all of them rather than needing a regex per target type.
+RE_GET_DETAIL = re.compile(
+    r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/list/(?P<index>\d+)/(?P<count>\d+)"
+)
 
 
 #: Signature every OSC handler in this module shares.
@@ -244,6 +256,48 @@ def handle_xyz(address: str, *args: object) -> None:
 
 
 @_guard
+def handle_get_count(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>[/<scope>]/count (uint32 argument)."""
+    m = RE_GET_COUNT.fullmatch(address)
+    if not m or not args or not isinstance(args[0], (int, float)):
+        return
+    key = m.group("type")
+    if m.group("scope") is not None:
+        key = f"{key}/{m.group('scope')}"
+    with state_lock:
+        state.target_counts[key] = int(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_get_detail(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>/<target>/list/<index>/<count>.
+
+    Eos sends the record in several packets; only the first carries the label,
+    so a later packet must not overwrite a label already captured. Arguments are
+    positional: 0 is the list index, 1 the UID, 2 the label.
+    """
+    m = RE_GET_DETAIL.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    number = m.group("target").rstrip("/")
+    uid = str(args[1]) if len(args) > 1 and isinstance(args[1], str) else ""
+    label = str(args[2]) if len(args) > 2 and isinstance(args[2], str) else ""
+
+    with state_lock:
+        bucket = state.show_targets.setdefault(target_type, {})
+        record = bucket.get(number)
+        if record is None:
+            bucket[number] = ShowTarget(target_type, number, label, uid)
+        else:
+            # Later packets of the same record carry no label; keep the first.
+            record.label = record.label or label
+            record.uid = record.uid or uid
+        _mark_update()
+
+
+@_guard
 def default_handler(address: str, *args: object) -> None:
     """Records liveness for messages we do not model, and logs them at DEBUG."""
     with state_lock:
@@ -274,6 +328,11 @@ def build_dispatcher() -> dispatcher.Dispatcher:
 
     disp.map("/eos/out/ds/*", handle_ds_bank_label)
     disp.map("/eos/out/ds/*/*", handle_ds_button_label)
+
+    # python-osc's "*" crosses "/", so one pattern reaches every depth these
+    # replies use; each handler re-checks with its anchored regex.
+    disp.map("/eos/out/get/*", handle_get_count)
+    disp.map("/eos/out/get/*", handle_get_detail)
 
     disp.set_default_handler(default_handler)
     return disp

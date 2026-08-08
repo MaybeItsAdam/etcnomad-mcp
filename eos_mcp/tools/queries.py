@@ -210,19 +210,40 @@ def get_connection_health() -> ToolResult:
     Call this first when a query says it has no data - it distinguishes "the
     console has not been asked yet" from "the listener never bound" or "the
     console is not sending".
+
+    If the listener is down, this retries the bind before reporting. The port
+    is usually held by another instance of this server, so the bind can start
+    succeeding long after startup - without a retry the listener would stay
+    dead for the life of the process even once the port was free.
     """
+    rebound = False
+    if not listener.is_running:
+        rebound = listener.start()
+
     s = snapshot()
     age = _age(s.last_update)
 
     if listener.bind_error:
         detail = f"OSC listener is NOT running: {listener.bind_error}"
+    elif rebound:
+        detail = (
+            f"OSC listener was down and has just rebound to {listener.bound_address}. "
+            "Call sync_state to repopulate console state."
+        )
     elif not listener.is_running:
         detail = "OSC listener has not been started."
     elif age is None:
         detail = (
             f"Listening on {listener.bound_address} but the console has sent nothing yet. "
-            "Call sync_state. If it stays silent, check OSC TX is enabled on the console "
-            f"and that its OSC UDP TX Port matches {config.port_rx}."
+            "Call sync_state. If it stays silent, the console is not transmitting, and "
+            "only a human at the console can fix it - these are show-file settings under "
+            "Setup > System > Show Control > OSC, not something this server can change. "
+            "Ask the user to check, in this order: (1) OSC UDP TX IP Address is the LAN "
+            "address of the machine running this server, and NOT 127.0.0.1 - Eos does "
+            "not bind its transmit socket to loopback, so a loopback address sends to "
+            "nobody even on a single machine, while TX still reads as enabled and "
+            f"commands still land; (2) OSC TX is enabled; (3) OSC UDP TX Port matches "
+            f"{config.port_rx}."
         )
     else:
         detail = f"Healthy. Last OSC message from the console {age:.1f}s ago."
@@ -261,6 +282,11 @@ def sync_state() -> ToolResult:
         "/eos/fader/1/config",
         "/eos/ds/1/config",
     ]
+    # Without this, Eos answers one-shot requests but never pushes anything
+    # else - selection, live/blind and fader config all stay empty no matter
+    # how often they are asked for. It must be sent before the requests below
+    # so their replies are not the only thing we ever hear.
+    client.send("/eos/subscribe", 1)
     for address in requests:
         client.send(address)
 
@@ -285,7 +311,8 @@ def sync_state() -> ToolResult:
     return success(
         "sync_state",
         f"Sent {len(requests)} requests to {client.target} but the console did not reply "
-        f"within {SYNC_TIMEOUT}s. It may be unreachable or OSC TX may be disabled. "
+        f"within {SYNC_TIMEOUT}s. It may be unreachable, OSC TX may be disabled, or the "
+        "console's OSC UDP TX IP Address may be blank or pointing at another machine. "
         "Call get_connection_health for details, and do not trust state until it responds.",
         responded=False,
         requests_sent=len(requests),

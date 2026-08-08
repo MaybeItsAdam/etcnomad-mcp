@@ -57,10 +57,23 @@ Browser → Setup → System Settings → System → Show Control → OSC:
 | OSC RX | Enabled |
 | OSC TX | Enabled |
 | OSC UDP RX Port | `8000` |
-| OSC UDP TX Port | `9001` |
+| OSC UDP TX Port | `8001` |
+| OSC UDP TX IP Address | the machine's **LAN IP** — *not* `127.0.0.1` |
 
 `OSC UDP RX Port` must match this server's `EOS_PORT_TX`, and `OSC UDP TX Port` must match its
 `EOS_PORT_RX`. They are named from the console's point of view, so they look crossed over.
+
+**`OSC UDP TX IP Address` must be a real interface address, never `127.0.0.1`.** Eos does not
+bind its transmit socket to loopback, so a loopback address there silently sends to nobody —
+even when the console *and* this server are the same machine. Use the machine's LAN IP
+(`ipconfig getifaddr en0` on macOS, `ipconfig` on Windows). Receiving is unaffected: this
+server binds `0.0.0.0`, and commands sent *to* Eos on `127.0.0.1` work normally.
+
+This asymmetry is the single most common setup failure, and it looks like a working setup:
+Eos reports TX as enabled, commands land, and every query stays empty.
+
+These are **show file** settings, not console-wide ones. Loading a different show — an incoming
+company's file, for instance — reverts them, and they have to be set again.
 
 **2. Add it to your MCP client.**
 
@@ -76,7 +89,7 @@ For Claude Desktop, add this to `claude_desktop_config.json`
       "env": {
         "EOS_IP": "127.0.0.1",
         "EOS_PORT_TX": "8000",
-        "EOS_PORT_RX": "9001"
+        "EOS_PORT_RX": "8001"
       }
     }
   }
@@ -101,7 +114,7 @@ All optional. Defaults suit ETCnomad running on the same machine.
 | --- | --- | --- |
 | `EOS_IP` | `127.0.0.1` | Console address to send commands to. |
 | `EOS_PORT_TX` | `8000` | Port commands are sent to. Match the console's **OSC UDP RX Port**. |
-| `EOS_PORT_RX` | `9001` | Port status is received on. Match the console's **OSC UDP TX Port**. |
+| `EOS_PORT_RX` | `8001` | Port status is received on. Match the console's **OSC UDP TX Port**. |
 | `EOS_RX_HOST` | `0.0.0.0` | Local interface the listener binds to. |
 | `EOS_LOG_LEVEL` | `INFO` | `DEBUG` logs every OSC message sent and received. |
 
@@ -150,8 +163,24 @@ rejected before it reaches the console.
 Start with `get_connection_health` — it distinguishes the failure modes below.
 
 **Queries say "no data reported yet".** Nothing has been requested. Call `sync_state`. If it
-reports no reply, the console is not sending: check OSC **TX** is enabled, and that its OSC UDP
-TX Port equals `EOS_PORT_RX`.
+reports no reply, the console is not sending. Check, in this order:
+
+1. **OSC UDP TX IP Address** is the machine running this server (`127.0.0.1` if that is the
+   console). Blank or stale is the usual culprit — Eos shows TX as enabled and transmits to
+   nobody, so the console's own settings screen looks correct.
+2. **OSC TX** is enabled.
+3. **OSC UDP TX Port** equals `EOS_PORT_RX`.
+
+The two directions are independent, and the failure is asymmetric: commands still land, so the
+console visibly responds while every query stays empty. To tell a wrong port from silence
+altogether, listen on the port directly — nothing arriving on any port means TX is off or
+misdirected, rather than mismatched:
+
+```bash
+nc -ulp 8001      # or: python3 -c "import socket;s=socket.socket(2,2);s.bind(('',8001));print(s.recvfrom(9999))"
+```
+
+Because these live in the show file, loading a different show silently reverts them.
 
 **`get_connection_health` reports a bind error.** Another process holds `EOS_PORT_RX`, often a
 second copy of this server. Stop it, or set `EOS_PORT_RX` to a free port and change the
