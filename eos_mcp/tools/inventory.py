@@ -42,6 +42,9 @@ TARGET_TYPES: dict[str, str] = {
 COUNT_TIMEOUT = 2.0
 DETAIL_TIMEOUT = 6.0
 POLL_INTERVAL = 0.05
+#: How many index requests to send before pausing, and how long to pause.
+REQUEST_CHUNK = 50
+CHUNK_PAUSE = 0.02
 
 
 def _resolve(target_type: str) -> str:
@@ -63,6 +66,34 @@ def _await_count(token: str) -> int | None:
     return None
 
 
+def _request_all(token: str, count: int) -> None:
+    """Request every record, in paced chunks.
+
+    A tight loop of thousands of datagrams is a good way to have the console,
+    the loopback buffer, or an intervening switch drop some of them. Pausing
+    between chunks costs milliseconds and makes a large show enumerate
+    reliably rather than mostly.
+    """
+    for start in range(0, count, REQUEST_CHUNK):
+        for index in range(start, min(start + REQUEST_CHUNK, count)):
+            client.send(f"/eos/get/{token}/index/{index}")
+        if start + REQUEST_CHUNK < count:
+            time.sleep(CHUNK_PAUSE)
+
+
+def _await_records(bucket_key: str, count: int) -> int:
+    """Wait for ``count`` records to arrive, returning how many did."""
+    deadline = time.monotonic() + DETAIL_TIMEOUT
+    got = 0
+    while time.monotonic() < deadline:
+        with state_lock:
+            got = len(state.show_targets.get(bucket_key, {}))
+        if got >= count:
+            break
+        time.sleep(POLL_INTERVAL)
+    return got
+
+
 def _enumerate(token: str) -> tuple[int | None, list[dict[str, object]]]:
     """Run the count-then-index protocol for one target type."""
     # Drop any previous answer so a stale count cannot satisfy the wait below.
@@ -77,17 +108,15 @@ def _enumerate(token: str) -> tuple[int | None, list[dict[str, object]]]:
     if count == 0:
         return 0, []
 
-    for index in range(count):
-        client.send(f"/eos/get/{token}/index/{index}")
-
     bucket_key = token.split("/")[0]
-    deadline = time.monotonic() + DETAIL_TIMEOUT
-    while time.monotonic() < deadline:
-        with state_lock:
-            got = len(state.show_targets.get(bucket_key, {}))
-        if got >= count:
-            break
-        time.sleep(POLL_INTERVAL)
+    _request_all(token, count)
+    got = _await_records(bucket_key, count)
+
+    # UDP drops silently, and a partial ledger reads like a small show rather
+    # than a lossy link. One retry costs little and recovers the usual case.
+    if got < count:
+        _request_all(token, count)
+        _await_records(bucket_key, count)
 
     records = snapshot().show_targets.get(bucket_key, {})
     rows: list[dict[str, object]] = []
@@ -171,7 +200,24 @@ def get_show_inventory() -> ToolResult:
             continue
         inventory[friendly] = {"count": count, "targets": rows}
 
-    populated = {k: v for k, v in inventory.items() if isinstance(v, dict) and v["count"]}
+    # Cues are the largest part of most shows and are addressed per cue list,
+    # so they cannot be walked like the flat types above. Omitting them made
+    # the "full ledger" quietly exclude most of the show.
+    cue_lists = inventory.get("cuelist")
+    if isinstance(cue_lists, dict):
+        cues: dict[str, object] = {}
+        for row in cue_lists["targets"]:
+            list_number = str(row["number"])
+            count, rows = _enumerate(f"cue/{list_number}")
+            if count is None:
+                unreachable.append(f"cue list {list_number}")
+                continue
+            cues[list_number] = {"count": count, "targets": rows}
+        if cues:
+            inventory["cue"] = cues
+
+    # "cue" is nested per cue list and carries no top-level count of its own.
+    populated = {k: v for k, v in inventory.items() if isinstance(v, dict) and v.get("count")}
     detail = f"Enumerated {len(inventory)} target types; {len(populated)} contain records."
     if unreachable:
         detail += f" No reply for: {', '.join(unreachable)}."

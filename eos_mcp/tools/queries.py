@@ -11,6 +11,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import time
+from pathlib import PurePosixPath
 
 from ..app import mcp
 from ..config import config
@@ -40,6 +41,14 @@ def _age(last_update: float | None) -> float | None:
     if last_update is None:
         return None
     return round(time.monotonic() - last_update, 3)
+
+
+def _name_from_path(show_path: str | None) -> str | None:
+    """Derive a show name from its file path, dropping directories and suffix."""
+    if not show_path:
+        return None
+    name = PurePosixPath(show_path.replace("\\", "/")).name
+    return name.rsplit(".", 1)[0] or None
 
 
 def _local_address() -> str | None:
@@ -366,19 +375,27 @@ def get_show_info() -> ToolResult:
             eos_version=s.eos_version,
         )
 
-    detail = f"Show: {s.show_name or 'unnamed'}"
+    # Eos does not always push /eos/out/show/name, but the path carries the
+    # same name. Reporting "unnamed" while holding the filename is unhelpful.
+    name = s.show_name or _name_from_path(s.show_path)
+
+    detail = f"Show: {name or 'unnamed'}"
     if s.show_path:
         detail += f" ({s.show_path})"
-    if s.show_saved is False:
-        detail += ". NOT saved - show-file settings, including OSC transmit, are lost on restart."
+    detail += (
+        ". Whether there are unsaved changes cannot be read over OSC - assume there are, "
+        "and note that show-file settings, including OSC transmit, are lost on restart "
+        "if the show has not been saved since they were set."
+    )
 
     return success(
         "get_show_info",
         detail,
         known=True,
-        show_name=s.show_name,
+        show_name=name,
+        show_name_reported_by_console=s.show_name,
         show_path=s.show_path,
-        show_saved=s.show_saved,
+        last_save_seen=s.show_saved,
         eos_version=s.eos_version,
     )
 

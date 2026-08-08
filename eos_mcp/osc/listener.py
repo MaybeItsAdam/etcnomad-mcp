@@ -55,6 +55,15 @@ RE_GET_DETAIL = re.compile(
     r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/list/(?P<index>\d+)/(?P<count>\d+)"
 )
 
+# The contents of a target, rather than its properties. Eos puts these on a
+# named sub-address - /eos/out/get/group/5/channels/list/... - which the detail
+# regex rejects because the segment is not numeric. Dropping them meant a
+# submaster or palette could be listed but never looked inside.
+RE_GET_CONTENTS = re.compile(
+    r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/(?P<part>channels|fx)"
+    r"/list/(?P<index>\d+)/(?P<count>\d+)"
+)
+
 # Eos announcing that show data of a type has changed. Cue notifications carry
 # their list number, which is dropped: the whole type is re-read either way.
 RE_NOTIFY = re.compile(
@@ -156,6 +165,10 @@ def handle_command_line(address: str, *args: object) -> None:
         return
     with state_lock:
         state.command_line = str(args[0])
+        # Bumped even when the text is unchanged. Callers wait for the console
+        # to echo *something*, and re-sending an identical command produces an
+        # identical line - comparing text would read that as no reply at all.
+        state.command_line_seq += 1
         _mark_update()
 
 
@@ -331,6 +344,37 @@ def handle_get_detail(address: str, *args: object) -> None:
 
 
 @_guard
+def handle_get_contents(address: str, *args: object) -> None:
+    """Handles /eos/out/get/<type>/<target>/{channels,fx}/list/<index>/<count>.
+
+    Arguments after the UID are an OSC number list - the channels a group or
+    palette covers, or the effects a submaster runs. Kept as text because Eos
+    sends ranges ("1-5") as readily as single numbers, and reformatting them
+    loses the console's own grouping.
+    """
+    m = RE_GET_CONTENTS.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    number = m.group("target").rstrip("/")
+    part = m.group("part")
+    values = [str(a) for a in args[2:] if a not in ("", None)]
+    if not values:
+        return
+
+    with state_lock:
+        bucket = state.show_targets.setdefault(target_type, {})
+        record = bucket.get(number)
+        if record is None:
+            record = ShowTarget(target_type, number)
+            bucket[number] = record
+        existing = str(record.extra.get(part, ""))
+        merged = [v for v in existing.split(" ") if v] + values
+        record.extra[part] = " ".join(merged)
+        _mark_update()
+
+
+@_guard
 def handle_show_name(address: str, *args: object) -> None:
     """Handles /eos/out/show/name."""
     if not args:
@@ -431,6 +475,7 @@ def build_dispatcher() -> dispatcher.Dispatcher:
 
     disp.map("/eos/out/get/*", handle_get_count)
     disp.map("/eos/out/get/*", handle_get_detail)
+    disp.map("/eos/out/get/*", handle_get_contents)
     disp.map("/eos/out/notify/*", handle_notify)
 
     disp.set_default_handler(default_handler)

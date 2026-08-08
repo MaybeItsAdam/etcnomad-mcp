@@ -70,6 +70,10 @@ class EosState:
     pending_cue_text: str = ""
     live_blind_state: int | None = None
     command_line: str = ""
+    #: Increments on every command line echo, including ones whose text is
+    #: identical to the last. Text comparison cannot tell "the console did not
+    #: reply" from "the console replied with the same thing".
+    command_line_seq: int = 0
     active_channels: str = ""
     faders: dict[int, FaderBank] = field(default_factory=dict)
     direct_selects: dict[int, DirectSelectBank] = field(default_factory=dict)

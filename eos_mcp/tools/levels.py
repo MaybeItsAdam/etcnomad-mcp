@@ -25,6 +25,9 @@ from ._common import (
 CONFIRM_TIMEOUT = 1.0
 CONFIRM_POLL_INTERVAL = 0.05
 
+#: What Eos appends when holding a destructive command for confirmation.
+CONFIRM_PROMPT = "Please Confirm"
+
 
 def _context_of(command_line_text: str) -> str:
     """Extract the display context from an Eos command line.
@@ -37,27 +40,34 @@ def _context_of(command_line_text: str) -> str:
     return parts[1].strip() if len(parts) > 2 else ""
 
 
-def _confirm(result: ToolResult, text: str, before: str) -> ToolResult:
+def _confirm(result: ToolResult, text: str, before_seq: int) -> ToolResult:
     """Read the command line back and report what the console made of it.
 
     A successful send only means the packet left this machine. Eos discards
     commands whose keystrokes belong to another display - Setup swallows them
-    silently - and reports syntax errors only on the command line. Neither is
-    visible in the send result, so both otherwise surface as ``ok: true`` with
-    the show unchanged, which is the most expensive way for this tool to fail.
+    silently - reports syntax errors only on the command line, and holds
+    destructive commands at a confirmation prompt. None of that is visible in
+    the send result, so each would otherwise surface as ``ok: true`` with the
+    show unchanged, which is the most expensive way for this tool to fail.
+
+    Waiting on a sequence number rather than the text matters: re-sending an
+    identical command produces an identical line, and comparing text would
+    report a working command as unconfirmed.
     """
     deadline = time.monotonic() + CONFIRM_TIMEOUT
-    readback = before
+    readback = ""
+    echoed = False
     while time.monotonic() < deadline:
         with state_lock:
-            readback = state.command_line
-        if readback != before:
-            break
+            if state.command_line_seq != before_seq:
+                readback = state.command_line
+                echoed = True
+                break
         time.sleep(CONFIRM_POLL_INTERVAL)
 
     result["console_command_line"] = readback
 
-    if readback == before:
+    if not echoed:
         result["confirmed"] = False
         result["detail"] += (
             f" NOT CONFIRMED: the console did not echo a command line within "
@@ -74,9 +84,23 @@ def _confirm(result: ToolResult, text: str, before: str) -> ToolResult:
             confirmed=True,
         )
 
-    result["confirmed"] = True
     context = _context_of(readback)
     result["console_context"] = context
+
+    if CONFIRM_PROMPT in readback:
+        # Eos guards destructive commands this way. Nothing has happened yet,
+        # and reporting success here would be reporting a delete that did not
+        # occur - the worst direction for this to be wrong in.
+        result["confirmed"] = False
+        result["awaiting_confirmation"] = True
+        result["detail"] += (
+            f" NOT EXECUTED: the console is holding this at a confirmation prompt "
+            f"({readback!r}). Send press_key('enter') to confirm, or "
+            "press_key('clear_cmdline') to abandon it. Nothing has changed yet."
+        )
+        return result
+
+    result["confirmed"] = True
     if context.startswith("Setup"):
         result["confirmed"] = False
         result["detail"] += (
@@ -114,10 +138,10 @@ def command_line(command: str, reset: bool = True) -> ToolResult:
     how = "Sent command" if reset else "Appended to command line"
 
     with state_lock:
-        before = state.command_line
+        before_seq = state.command_line_seq
 
     result = send(address, text, action="command_line", detail=f"{how}: {text}")
-    return _confirm(result, text, before)
+    return _confirm(result, text, before_seq)
 
 
 @mcp.tool()

@@ -42,6 +42,9 @@ def console(sent: RecordingUDPClient, monkeypatch: pytest.MonkeyPatch) -> FakeCo
         if fake.reply is not None:
             with state_lock:
                 state.command_line = fake.reply
+                # The real handler bumps this on every echo, including one
+                # whose text is unchanged; confirmation waits on it.
+                state.command_line_seq += 1
 
     monkeypatch.setattr(sent, "send_message", send_message)
     return fake
@@ -111,3 +114,40 @@ def test_readback_is_always_reported(console: FakeConsole) -> None:
 )
 def test_context_extraction(line: str, expected: str) -> None:
     assert levels._context_of(line) == expected
+
+
+# --- Confirmation prompts ------------------------------------------------
+
+
+def test_confirmation_prompt_is_not_reported_as_done(console: FakeConsole) -> None:
+    """Eos holds destructive commands; nothing has happened yet.
+
+    Observed live on "Delete Color Palette 2 Thru 4", which reported
+    confirmed: true while the console was waiting for a keypress.
+    """
+    console.will_reply("LIVE: Cue  0.1 : Delete Color Palette 2 Thru 4  Please Confirm")
+    result = command_line("Delete Color_Palette 2 Thru 4 Enter")
+    assert result["confirmed"] is False
+    assert result["awaiting_confirmation"] is True
+    assert "NOT EXECUTED" in result["detail"]
+
+
+def test_ordinary_command_is_not_flagged_as_awaiting_confirmation(
+    console: FakeConsole,
+) -> None:
+    console.will_reply("LIVE: Cue  0.1 : Record Sub 5 #")
+    result = command_line("Record Sub 5 Enter")
+    assert result["confirmed"] is True
+    assert "awaiting_confirmation" not in result
+
+
+# --- Repeated identical commands -----------------------------------------
+
+
+def test_identical_repeated_command_is_still_confirmed(console: FakeConsole) -> None:
+    """The echo is byte-identical the second time; only the sequence changes."""
+    console.will_reply("LIVE: Cue  0.1 : Chan 30 @ Full #")
+    first = command_line("Chan 30 At Full Enter")
+    second = command_line("Chan 30 At Full Enter")
+    assert first["confirmed"] is True
+    assert second["confirmed"] is True

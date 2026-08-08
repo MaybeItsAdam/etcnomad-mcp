@@ -91,3 +91,23 @@ def test_sender_matching(
 ) -> None:
     monkeypatch.setattr(queries, "config", dataclasses.replace(queries.config, eos_ip=console_ip))
     assert queries._sender_is_console(sender) is expected
+
+
+# --- Show name ------------------------------------------------------------
+
+
+def test_show_name_falls_back_to_the_filename() -> None:
+    """Eos reported a path but no name on a real console."""
+    assert (
+        queries._name_from_path("/Users/a/ETC/Eos/ShowArchive/Camden2026 rattlepole.esf3d")
+        == "Camden2026 rattlepole"
+    )
+
+
+def test_windows_style_paths_are_handled() -> None:
+    assert queries._name_from_path(r"C:\Users\a\Shows\panto.esf3d") == "panto"
+
+
+def test_no_path_yields_no_name() -> None:
+    assert queries._name_from_path(None) is None
+    assert queries._name_from_path("") is None

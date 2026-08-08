@@ -108,3 +108,38 @@ def test_cue_notify_clears_every_list_of_that_type(dispatch) -> None:  # type: i
     dispatch("/eos/out/get/cue/2/count", 7)
     dispatch("/eos/out/notify/cue/1/list/0/1", 3)
     assert snapshot().target_counts == {}
+
+
+# --- Target contents -----------------------------------------------------
+
+
+def test_group_channel_list_is_captured(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """Contents live on a named sub-address that the detail regex rejects."""
+    dispatch("/eos/out/get/group/5/channels/list/0/1", 0, "uid-g", "1-5", "30")
+    assert snapshot().show_targets["group"]["5"].extra["channels"] == "1-5 30"
+
+
+def test_palette_channel_list_is_captured(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """Not knowing a palette's scope caused one to be rebuilt on wrong fixtures."""
+    dispatch("/eos/out/get/cp/1/channels/list/0/1", 0, "uid-cp", "100-103")
+    assert snapshot().show_targets["cp"]["1"].extra["channels"] == "100-103"
+
+
+def test_sub_effect_list_is_captured(dispatch) -> None:  # type: ignore[no-untyped-def]
+    dispatch("/eos/out/get/sub/5/fx/list/0/1", 0, "uid-s", "800")
+    assert snapshot().show_targets["sub"]["5"].extra["fx"] == "800"
+
+
+def test_contents_across_packets_accumulate(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """A long channel list arrives split over several packets."""
+    dispatch("/eos/out/get/group/5/channels/list/0/2", 0, "uid-g", "1-5")
+    dispatch("/eos/out/get/group/5/channels/list/1/2", 1, "uid-g", "30")
+    assert snapshot().show_targets["group"]["5"].extra["channels"] == "1-5 30"
+
+
+def test_contents_do_not_clobber_the_label(dispatch) -> None:  # type: ignore[no-untyped-def]
+    dispatch("/eos/out/get/group/5/list/0/1", 0, "uid-g", "warms")
+    dispatch("/eos/out/get/group/5/channels/list/0/1", 0, "uid-g", "1-5")
+    rec = snapshot().show_targets["group"]["5"]
+    assert rec.label == "warms"
+    assert rec.extra["channels"] == "1-5"
