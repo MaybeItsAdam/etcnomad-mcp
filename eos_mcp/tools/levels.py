@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from typing import Literal
 
 from ..app import mcp
 from ..errors import EosValidationError
 from ..osc import address as addr
+from ..state import state, state_lock
 from ._common import (
     DmxValue,
     LevelModifier,
@@ -14,9 +16,74 @@ from ._common import (
     Percent,
     TargetNumber,
     ToolResult,
+    failure,
     guarded,
     send,
 )
+
+#: How long to wait for Eos to echo the command line back.
+CONFIRM_TIMEOUT = 1.0
+CONFIRM_POLL_INTERVAL = 0.05
+
+
+def _context_of(command_line_text: str) -> str:
+    """Extract the display context from an Eos command line.
+
+    Eos formats the line as ``<mode>: <context> : <command>`` - for example
+    ``LIVE: Cue  0.1 : Chan 30 @ Full #`` or ``BLIND: Setup : ``. The middle
+    segment is the display currently receiving keystrokes.
+    """
+    parts = command_line_text.split(":")
+    return parts[1].strip() if len(parts) > 2 else ""
+
+
+def _confirm(result: ToolResult, text: str, before: str) -> ToolResult:
+    """Read the command line back and report what the console made of it.
+
+    A successful send only means the packet left this machine. Eos discards
+    commands whose keystrokes belong to another display - Setup swallows them
+    silently - and reports syntax errors only on the command line. Neither is
+    visible in the send result, so both otherwise surface as ``ok: true`` with
+    the show unchanged, which is the most expensive way for this tool to fail.
+    """
+    deadline = time.monotonic() + CONFIRM_TIMEOUT
+    readback = before
+    while time.monotonic() < deadline:
+        with state_lock:
+            readback = state.command_line
+        if readback != before:
+            break
+        time.sleep(CONFIRM_POLL_INTERVAL)
+
+    result["console_command_line"] = readback
+
+    if readback == before:
+        result["confirmed"] = False
+        result["detail"] += (
+            f" NOT CONFIRMED: the console did not echo a command line within "
+            f"{CONFIRM_TIMEOUT}s. Do not assume this took effect - check "
+            "get_connection_health, and verify with list_show_targets if it wrote anything."
+        )
+        return result
+
+    if "Error" in readback:
+        return failure(
+            "command_line",
+            f"The console rejected {text!r}. Its command line reads: {readback}",
+            console_command_line=readback,
+            confirmed=True,
+        )
+
+    result["confirmed"] = True
+    context = _context_of(readback)
+    result["console_context"] = context
+    if context.startswith("Setup"):
+        result["confirmed"] = False
+        result["detail"] += (
+            " NOT CONFIRMED: the console is in Setup, which consumes keystrokes, so this "
+            "almost certainly did nothing. Leave Setup first - press_key('live') - and retry."
+        )
+    return result
 
 
 @mcp.tool()
@@ -45,7 +112,12 @@ def command_line(command: str, reset: bool = True) -> ToolResult:
         raise EosValidationError("command must not be empty")
     address = "/eos/newcmd" if reset else "/eos/cmd"
     how = "Sent command" if reset else "Appended to command line"
-    return send(address, text, action="command_line", detail=f"{how}: {text}")
+
+    with state_lock:
+        before = state.command_line
+
+    result = send(address, text, action="command_line", detail=f"{how}: {text}")
+    return _confirm(result, text, before)
 
 
 @mcp.tool()
