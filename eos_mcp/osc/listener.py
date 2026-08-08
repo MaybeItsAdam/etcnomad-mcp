@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 from pythonosc import dispatcher, osc_server
 
@@ -338,6 +339,24 @@ def build_dispatcher() -> dispatcher.Dispatcher:
     return disp
 
 
+class RecordingOSCUDPServer(osc_server.ThreadingOSCUDPServer):
+    """An OSC server that records who sent each datagram.
+
+    Without this the server knows only that *something* arrived on the port.
+    Any local process can send there, so "we received a packet" was being
+    reported as "the console is healthy" - which is exactly backwards for a
+    tool whose job is telling you whether the console is reachable.
+
+    ``verify_request`` runs for every datagram regardless of which handler
+    ends up matching, so recording here cannot miss one.
+    """
+
+    def verify_request(self, request: Any, client_address: Any) -> bool:
+        with state_lock:
+            state.last_sender = f"{client_address[0]}:{client_address[1]}"
+        return True
+
+
 class OscListener:
     """Owns the UDP server thread that receives replies from Eos.
 
@@ -382,7 +401,7 @@ class OscListener:
             return True
 
         try:
-            self._server = osc_server.ThreadingOSCUDPServer(
+            self._server = RecordingOSCUDPServer(
                 (self._config.rx_host, self._config.port_rx), build_dispatcher()
             )
         except OSError as exc:

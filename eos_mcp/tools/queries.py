@@ -8,6 +8,7 @@ yet, which is deliberately distinct from a real value.
 
 from __future__ import annotations
 
+import ipaddress
 import time
 
 from ..app import mcp
@@ -18,7 +19,12 @@ from ..state import snapshot, state, state_lock
 from ._common import BankIndex, ToolResult, guarded, success
 
 #: How long `sync_state` waits for the console to answer.
-SYNC_TIMEOUT = 1.5
+#:
+#: 1.5s was too short against a real console: Eos was replying, but late, so
+#: sync_state reported failure while enumeration - which waits longer - worked
+#: first time. A sync that gives up early is worse than a slow one, because it
+#: reports a working link as dead.
+SYNC_TIMEOUT = 4.0
 #: How often it re-checks while waiting.
 SYNC_POLL_INTERVAL = 0.05
 
@@ -28,6 +34,32 @@ def _age(last_update: float | None) -> float | None:
     if last_update is None:
         return None
     return round(time.monotonic() - last_update, 3)
+
+
+def _sender_is_console(last_sender: str | None) -> bool:
+    """Whether the last datagram came from the address commands are sent to."""
+    if not last_sender:
+        return False
+    return last_sender.rsplit(":", 1)[0] == config.eos_ip
+
+
+def _sender_note() -> str:
+    """Explain the benign case where sender and console address legitimately differ.
+
+    With Eos on this machine, commands are addressed to loopback while Eos
+    transmits from its LAN interface - because it does not bind loopback for
+    transmit. The two addresses then never match, and that is correct.
+    """
+    try:
+        console_is_local = ipaddress.ip_address(config.eos_ip).is_loopback
+    except ValueError:
+        return ""
+    if not console_is_local:
+        return ""
+    return (
+        " Note: with EOS_IP set to loopback and Eos on this machine, its replies "
+        "arrive from the LAN interface, so a differing address here is expected."
+    )
 
 
 @mcp.tool()
@@ -245,8 +277,14 @@ def get_connection_health() -> ToolResult:
             f"commands still land; (2) OSC TX is enabled; (3) OSC UDP TX Port matches "
             f"{config.port_rx}."
         )
+    elif _sender_is_console(s.last_sender):
+        detail = f"Healthy. Last OSC message from the console ({s.last_sender}) {age:.1f}s ago."
     else:
-        detail = f"Healthy. Last OSC message from the console {age:.1f}s ago."
+        detail = (
+            f"Last OSC message came from {s.last_sender} {age:.1f}s ago, which is not the "
+            f"configured console address {config.eos_ip}. Any process can send to this "
+            f"port, so traffic alone is not proof the console is reachable.{_sender_note()}"
+        )
 
     return success(
         "get_connection_health",
@@ -256,6 +294,7 @@ def get_connection_health() -> ToolResult:
         bind_error=listener.bind_error,
         command_target=client.target,
         seconds_since_last_message=age,
+        last_sender=s.last_sender,
         has_data=s.has_data,
     )
 
@@ -302,10 +341,13 @@ def sync_state() -> ToolResult:
         time.sleep(SYNC_POLL_INTERVAL)
 
     if responded:
+        elapsed = round(time.monotonic() - (deadline - SYNC_TIMEOUT), 2)
         return success(
             "sync_state",
-            "Synchronisation complete - the console responded and state is populated.",
+            f"Synchronisation complete - the console responded in {elapsed}s and state "
+            "is populated.",
             responded=True,
+            seconds_to_respond=elapsed,
             requests_sent=len(requests),
         )
     return success(

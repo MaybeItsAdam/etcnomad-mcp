@@ -78,6 +78,10 @@ class EosState:
     show_targets: dict[str, dict[str, ShowTarget]] = field(default_factory=dict)
     #: ``time.monotonic()`` of the most recent OSC message that changed state.
     last_update: float | None = None
+    #: ``host:port`` of whoever sent the most recent datagram. Any process on
+    #: the machine can send to the listener, so liveness alone does not mean
+    #: the console is talking to us.
+    last_sender: str | None = None
 
     @property
     def live_blind_label(self) -> str:
