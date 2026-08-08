@@ -125,7 +125,13 @@ Invalid values are rejected at startup with a message naming the variable.
 Every tool returns a structured result with an `ok` field. `ok: false` means the command never
 reached the console, and `error` says why — check it rather than assuming success.
 
-**Diagnostics** — `get_connection_health`, `sync_state`, `get_show_info`
+**Diagnostics** — `get_connection_health`, `sync_state`, `get_show_info`,
+`get_channel_parameters`
+
+`get_channel_parameters` reports what a channel is *doing* — every live parameter
+value — as opposed to what has been assigned to it. It is how you tell a running
+effect from one that was recorded and does nothing. Eos has undo, covering Record,
+Update and Delete: `press_key("undo")`.
 
 **Show data** — `list_show_targets`, `get_show_inventory`, `audit_show`
 

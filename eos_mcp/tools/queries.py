@@ -18,7 +18,7 @@ from ..config import config
 from ..osc.client import client
 from ..osc.listener import listener
 from ..state import snapshot, state, state_lock
-from ._common import BankIndex, ToolResult, guarded, success
+from ._common import BankIndex, TargetNumber, ToolResult, guarded, success
 
 #: How long `sync_state` waits for the console to answer.
 #:
@@ -341,6 +341,63 @@ def get_connection_health() -> ToolResult:
         seconds_since_last_message=age,
         last_sender=s.last_sender,
         has_data=s.has_data,
+    )
+
+
+@mcp.tool()
+@guarded("get_channel_parameters")
+def get_channel_parameters(channel: TargetNumber) -> ToolResult:
+    """Reports what a channel is currently doing - every live parameter value.
+
+    This is the only way to see actual output. Enumeration says what has been
+    *assigned* to a channel; this says what the channel is doing as a result,
+    which is how you tell a running effect from one that was recorded and does
+    nothing.
+
+    Selecting the channel is how Eos is asked, so this changes the console's
+    current selection as a side effect.
+
+    Args:
+        channel: The channel to inspect.
+    """
+    with state_lock:
+        before_seq = state.wheels_seq
+        state.wheels.clear()
+
+    client.send(f"/eos/chan/{channel}")
+
+    deadline = time.monotonic() + SYNC_TIMEOUT
+    while time.monotonic() < deadline:
+        with state_lock:
+            if state.wheels_seq != before_seq and state.wheels:
+                break
+        time.sleep(SYNC_POLL_INTERVAL)
+
+    s = snapshot()
+    if not s.wheels:
+        return success(
+            "get_channel_parameters",
+            f"Selected channel {channel} but the console reported no parameters within "
+            f"{SYNC_TIMEOUT}s. Check get_connection_health - this says nothing about "
+            "what the channel is doing.",
+            channel=channel,
+            known=False,
+            parameters=[],
+        )
+
+    parameters = [
+        {"name": w.name, "level": w.level, "group": w.group}
+        for _, w in sorted(s.wheels.items())
+        if w.name
+    ]
+    summary = ", ".join(f"{p['name']} {p['level']:g}" for p in parameters)
+    return success(
+        "get_channel_parameters",
+        f"Channel {channel}: {summary}",
+        channel=channel,
+        known=True,
+        selection=s.active_channels,
+        parameters=parameters,
     )
 
 

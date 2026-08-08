@@ -34,6 +34,20 @@ class DirectSelectBank:
 
 
 @dataclass
+class Wheel:
+    """One encoder wheel: a live parameter of the current selection.
+
+    Eos publishes these whenever the selection changes, which makes them the
+    only way to read what a channel is actually *doing* - its pan, tilt and
+    colour - rather than what has been assigned to it.
+    """
+
+    name: str = ""
+    group: int = 0
+    level: float = 0.0
+
+
+@dataclass
 class ShowTarget:
     """One numbered record in the show - a sub, effect, group, cue, and so on.
 
@@ -78,6 +92,11 @@ class EosState:
     faders: dict[int, FaderBank] = field(default_factory=dict)
     direct_selects: dict[int, DirectSelectBank] = field(default_factory=dict)
     wheel_mode: object | None = None
+    #: Encoder wheels for the current selection, keyed by wheel index.
+    wheels: dict[int, Wheel] = field(default_factory=dict)
+    #: Bumped whenever a wheel is reported, so a caller can tell a fresh set
+    #: from the previous selection's leftovers.
+    wheels_seq: int = 0
     pantilt: list[float] = field(default_factory=list)
     xyz: list[float] = field(default_factory=list)
     #: Which show is loaded. Without this there is no way to tell whether the

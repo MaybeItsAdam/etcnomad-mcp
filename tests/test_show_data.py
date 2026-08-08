@@ -143,3 +143,60 @@ def test_contents_do_not_clobber_the_label(dispatch) -> None:  # type: ignore[no
     rec = snapshot().show_targets["group"]["5"]
     assert rec.label == "warms"
     assert rec.extra["channels"] == "1-5"
+
+
+# --- Show load invalidation ----------------------------------------------
+
+
+def test_show_load_clears_every_cached_type(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """Per-type notifications do not fire when the whole show is swapped."""
+    dispatch("/eos/out/get/sub/5/list/0/1", 0, "uid-5", "Ch30 Ballyhoo")
+    dispatch("/eos/out/get/fx/800/list/0/1", 0, "uid-800", "Ballyhoo")
+    dispatch("/eos/out/get/sub/count", 13)
+    dispatch("/eos/out/show/name", "Camden2026")
+
+    dispatch("/eos/out/event/show/loaded")
+
+    s = snapshot()
+    assert s.show_targets == {}
+    assert s.target_counts == {}
+    assert s.show_name is None
+
+
+def test_show_cleared_also_invalidates(dispatch) -> None:  # type: ignore[no-untyped-def]
+    dispatch("/eos/out/get/sub/count", 13)
+    dispatch("/eos/out/event/show/cleared")
+    assert snapshot().target_counts == {}
+
+
+# --- Effect detail --------------------------------------------------------
+
+
+def test_effect_reports_type_and_timing(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """ "Make the ballyhoo slower" needs a rate that can be read first."""
+    dispatch(
+        "/eos/out/get/fx/800/list/0/1", 0, "uid-800", "Ballyhoo", "Absolute", "2", "3", "5", 75
+    )
+    extra = snapshot().show_targets["fx"]["800"].extra
+    assert extra["effect_type"] == "Absolute"
+    assert extra["duration"] == "5"
+    assert extra["scale"] == 75
+
+
+# --- Live parameters ------------------------------------------------------
+
+
+def test_wheels_capture_parameter_name_and_level(dispatch) -> None:  # type: ignore[no-untyped-def]
+    """The name arrives with its level embedded; the float is authoritative."""
+    dispatch("/eos/out/active/wheel/1", "Intens [100]", 1, 1.0)
+    dispatch("/eos/out/active/wheel/2", "Pan [45]", 2, 0.5)
+    wheels = snapshot().wheels
+    assert wheels[1].name == "Intens"
+    assert wheels[1].level == 1.0
+    assert wheels[2].name == "Pan"
+    assert wheels[2].group == 2
+
+
+def test_wheel_without_a_bracket_still_names_the_parameter(dispatch) -> None:  # type: ignore[no-untyped-def]
+    dispatch("/eos/out/active/wheel/1", "Zoom", 3, 0.25)
+    assert snapshot().wheels[1].name == "Zoom"

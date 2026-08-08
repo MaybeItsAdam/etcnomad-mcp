@@ -27,7 +27,7 @@ from pythonosc import dispatcher, osc_server
 from ..config import EosConfig, config
 from ..errors import EosError
 from ..logging_setup import get_logger
-from ..state import DirectSelectBank, Fader, FaderBank, ShowTarget, state, state_lock
+from ..state import DirectSelectBank, Fader, FaderBank, ShowTarget, Wheel, state, state_lock
 
 logger = get_logger(__name__)
 
@@ -40,6 +40,7 @@ RE_PENDING_CUE = re.compile(rf"/eos/out/pending/cue/(?P<list>\d+)/(?P<cue>{_CUE}
 RE_FADER_BANK = re.compile(r"/eos/out/fader/(?P<bank>\d+)")
 RE_FADER_LEVEL = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)")
 RE_FADER_NAME = re.compile(r"/eos/out/fader/(?P<bank>\d+)/(?P<fader>\d+)/name")
+RE_ACTIVE_WHEEL = re.compile(r"/eos/out/active/wheel/(?P<index>\d+)")
 RE_DS_BANK = re.compile(r"/eos/out/ds/(?P<bank>\d+)")
 RE_DS_BUTTON = re.compile(r"/eos/out/ds/(?P<bank>\d+)/(?P<button>\d+)")
 
@@ -298,6 +299,9 @@ def handle_get_count(address: str, *args: object) -> None:
 DETAIL_FIELDS: dict[str, dict[int, str]] = {
     "patch": {3: "manufacturer", 4: "model", 5: "address", 7: "level", 8: "gel"},
     "sub": {3: "mode", 4: "fader_mode"},
+    # Without these an effect can be listed but not described, so "make the
+    # ballyhoo slower" would mean editing a rate nobody can read first.
+    "fx": {3: "effect_type", 4: "entry", 5: "exit", 6: "duration", 7: "scale"},
 }
 
 
@@ -372,6 +376,50 @@ def handle_get_contents(address: str, *args: object) -> None:
         merged = [v for v in existing.split(" ") if v] + values
         record.extra[part] = " ".join(merged)
         _mark_update()
+
+
+@_guard
+def handle_active_wheel(address: str, *args: object) -> None:
+    """Handles /eos/out/active/wheel/<index> = "<name> [<level>]", <group>, <level>.
+
+    The name arrives with its level embedded - "Pan [45]" - so the text before
+    the bracket is the parameter name and the float argument is authoritative
+    for the value.
+    """
+    m = RE_ACTIVE_WHEEL.fullmatch(address)
+    if not m or not args:
+        return
+    index = int(m.group("index"))
+    raw_name = str(args[0]) if isinstance(args[0], str) else ""
+    name = raw_name.split("[")[0].strip()
+    group = int(args[1]) if len(args) > 1 and isinstance(args[1], (int, float)) else 0
+    level = float(args[2]) if len(args) > 2 and isinstance(args[2], (int, float)) else 0.0
+
+    with state_lock:
+        state.wheels[index] = Wheel(name=name, group=group, level=level)
+        state.wheels_seq += 1
+        _mark_update()
+
+
+@_guard
+def handle_show_loaded(address: str, *args: object) -> None:
+    """Handles /eos/out/event/show/loaded and .../cleared.
+
+    A different show means every cached record describes a show that is no
+    longer open. Per-type notifications do not cover this: they fire when data
+    of that type changes, not when the whole show is swapped. Leaving the cache
+    in place would let "is sub 5 free?" be answered from the previous show and
+    overwrite something.
+    """
+    with state_lock:
+        state.show_targets.clear()
+        state.target_counts.clear()
+        state.show_name = None
+        state.show_path = None
+        state.show_saved = None
+        state.wheels.clear()
+        _mark_update()
+    logger.info("Show %s; dropped all cached show data", address.rsplit("/", 1)[-1])
 
 
 @_guard
@@ -468,9 +516,13 @@ def build_dispatcher() -> dispatcher.Dispatcher:
 
     # python-osc's "*" crosses "/", so one pattern reaches every depth these
     # replies use; each handler re-checks with its anchored regex.
+    disp.map("/eos/out/active/wheel/*", handle_active_wheel)
+
     disp.map("/eos/out/show/name", handle_show_name)
     disp.map("/eos/out/get/show/path", handle_show_path)
     disp.map("/eos/out/event/show/saved", handle_show_saved)
+    disp.map("/eos/out/event/show/loaded", handle_show_loaded)
+    disp.map("/eos/out/event/show/cleared", handle_show_loaded)
     disp.map("/eos/out/get/version", handle_version)
 
     disp.map("/eos/out/get/*", handle_get_count)
