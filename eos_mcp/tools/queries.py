@@ -28,6 +28,11 @@ SYNC_TIMEOUT = 4.0
 #: How often it re-checks while waiting.
 SYNC_POLL_INTERVAL = 0.05
 
+#: Size of the fader and direct select banks sync_state creates. Ten covers a
+#: standard console fader page; configure_fader_bank overrides it.
+DEFAULT_FADER_COUNT = 10
+DEFAULT_DS_COUNT = 10
+
 
 def _age(last_update: float | None) -> float | None:
     """Seconds since a monotonic timestamp, or ``None`` if never set."""
@@ -300,6 +305,54 @@ def get_connection_health() -> ToolResult:
 
 
 @mcp.tool()
+@guarded("get_show_info")
+def get_show_info() -> ToolResult:
+    """Reports which show is loaded, where it lives, and the Eos version.
+
+    Worth checking before auditing or writing anything. A console can hold a
+    different show than the one you have open on disk, and every conclusion
+    drawn from the wrong show is wrong.
+    """
+    client.send("/eos/get/show/path")
+    client.send("/eos/get/version")
+
+    deadline = time.monotonic() + SYNC_TIMEOUT
+    while time.monotonic() < deadline:
+        s = snapshot()
+        if s.show_name is not None or s.show_path is not None:
+            break
+        time.sleep(SYNC_POLL_INTERVAL)
+
+    s = snapshot()
+    if s.show_name is None and s.show_path is None:
+        return success(
+            "get_show_info",
+            f"The console did not report a show within {SYNC_TIMEOUT}s. Check "
+            "get_connection_health - do not assume which show is loaded.",
+            known=False,
+            show_name=None,
+            show_path=None,
+            eos_version=s.eos_version,
+        )
+
+    detail = f"Show: {s.show_name or 'unnamed'}"
+    if s.show_path:
+        detail += f" ({s.show_path})"
+    if s.show_saved is False:
+        detail += ". NOT saved - show-file settings, including OSC transmit, are lost on restart."
+
+    return success(
+        "get_show_info",
+        detail,
+        known=True,
+        show_name=s.show_name,
+        show_path=s.show_path,
+        show_saved=s.show_saved,
+        eos_version=s.eos_version,
+    )
+
+
+@mcp.tool()
 @guarded("sync_state")
 def sync_state() -> ToolResult:
     """Asks Eos to re-send its current status, and waits for a reply.
@@ -316,10 +369,11 @@ def sync_state() -> ToolResult:
         "/eos/get/version",
         "/eos/get/cmd",
         "/eos/get/setup",
-        # Ask the console to publish its fader banks and direct selects.
-        "/eos/fader/0/config",
-        "/eos/fader/1/config",
-        "/eos/ds/1/config",
+        # Fader and direct select banks must be *created* before Eos sends any
+        # labels or levels for them - the count is not optional. Requesting
+        # ".../config" with no count creates nothing, so these stayed empty.
+        f"/eos/fader/1/config/{DEFAULT_FADER_COUNT}",
+        f"/eos/ds/1/config/sub/{DEFAULT_DS_COUNT}",
     ]
     # Without this, Eos answers one-shot requests but never pushes anything
     # else - selection, live/blind and fader config all stay empty no matter

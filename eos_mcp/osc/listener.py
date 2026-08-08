@@ -25,6 +25,7 @@ from typing import Any
 from pythonosc import dispatcher, osc_server
 
 from ..config import EosConfig, config
+from ..errors import EosError
 from ..logging_setup import get_logger
 from ..state import DirectSelectBank, Fader, FaderBank, ShowTarget, state, state_lock
 
@@ -52,6 +53,12 @@ RE_GET_COUNT = re.compile(r"/eos/out/get/(?P<type>[a-z0-9]+)(?:/(?P<scope>[\d.]+
 # correct for all of them rather than needing a regex per target type.
 RE_GET_DETAIL = re.compile(
     r"/eos/out/get/(?P<type>[a-z0-9]+)/(?P<target>[\d./]+)/list/(?P<index>\d+)/(?P<count>\d+)"
+)
+
+# Eos announcing that show data of a type has changed. Cue notifications carry
+# their list number, which is dropped: the whole type is re-read either way.
+RE_NOTIFY = re.compile(
+    r"/eos/out/notify/(?P<type>[a-z0-9]+)(?:/[\d.]+)?/list/(?P<index>\d+)/(?P<count>\d+)"
 )
 
 
@@ -270,6 +277,29 @@ def handle_get_count(address: str, *args: object) -> None:
         _mark_update()
 
 
+#: Extra arguments worth keeping, by target type, as ``{argument index: name}``.
+#: Argument 0 is always the list index, 1 the UID and 2 the label, so these
+#: start at 3. Patch is the one that matters: without the manufacturer and
+#: model there is no way to tell a dimmer from a moving light, which is the
+#: difference between an effect that works and one that cannot.
+DETAIL_FIELDS: dict[str, dict[int, str]] = {
+    "patch": {3: "manufacturer", 4: "model", 5: "address", 7: "level", 8: "gel"},
+    "sub": {3: "mode", 4: "fader_mode"},
+}
+
+
+def _extra_fields(target_type: str, args: tuple[object, ...]) -> dict[str, object]:
+    """Pull the type-specific arguments out of a detail reply."""
+    fields = DETAIL_FIELDS.get(target_type)
+    if not fields:
+        return {}
+    found: dict[str, object] = {}
+    for index, name in fields.items():
+        if index < len(args) and args[index] not in ("", None):
+            found[name] = args[index]
+    return found
+
+
 @_guard
 def handle_get_detail(address: str, *args: object) -> None:
     """Handles /eos/out/get/<type>/<target>/list/<index>/<count>.
@@ -285,17 +315,79 @@ def handle_get_detail(address: str, *args: object) -> None:
     number = m.group("target").rstrip("/")
     uid = str(args[1]) if len(args) > 1 and isinstance(args[1], str) else ""
     label = str(args[2]) if len(args) > 2 and isinstance(args[2], str) else ""
+    extra = _extra_fields(target_type, args)
 
     with state_lock:
         bucket = state.show_targets.setdefault(target_type, {})
         record = bucket.get(number)
         if record is None:
-            bucket[number] = ShowTarget(target_type, number, label, uid)
+            bucket[number] = ShowTarget(target_type, number, label, uid, extra)
         else:
             # Later packets of the same record carry no label; keep the first.
             record.label = record.label or label
             record.uid = record.uid or uid
+            record.extra.update(extra)
         _mark_update()
+
+
+@_guard
+def handle_show_name(address: str, *args: object) -> None:
+    """Handles /eos/out/show/name."""
+    if not args:
+        return
+    with state_lock:
+        state.show_name = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_show_path(address: str, *args: object) -> None:
+    """Handles /eos/out/get/show/path."""
+    if not args:
+        return
+    with state_lock:
+        state.show_path = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_show_saved(address: str, *args: object) -> None:
+    """Handles /eos/out/event/show/saved."""
+    with state_lock:
+        state.show_saved = True
+        _mark_update()
+
+
+@_guard
+def handle_version(address: str, *args: object) -> None:
+    """Handles /eos/out/get/version."""
+    if not args:
+        return
+    with state_lock:
+        state.eos_version = str(args[0])
+        _mark_update()
+
+
+@_guard
+def handle_notify(address: str, *args: object) -> None:
+    """Handles /eos/out/notify/<type>/list/<index>/<count>.
+
+    Eos sends this when show data of that type changes. The cached enumeration
+    is now stale, and stale data here is dangerous rather than merely old: a
+    caller checking whether sub 5 is free would get an answer describing the
+    show as it was, and overwrite something. Dropping the cache forces the next
+    read to go back to the console.
+    """
+    m = RE_NOTIFY.fullmatch(address)
+    if not m:
+        return
+    target_type = m.group("type")
+    with state_lock:
+        state.show_targets.pop(target_type, None)
+        for key in [k for k in state.target_counts if k.split("/")[0] == target_type]:
+            del state.target_counts[key]
+        _mark_update()
+    logger.debug("Show data changed for %s; dropped cached enumeration", target_type)
 
 
 @_guard
@@ -332,8 +424,14 @@ def build_dispatcher() -> dispatcher.Dispatcher:
 
     # python-osc's "*" crosses "/", so one pattern reaches every depth these
     # replies use; each handler re-checks with its anchored regex.
+    disp.map("/eos/out/show/name", handle_show_name)
+    disp.map("/eos/out/get/show/path", handle_show_path)
+    disp.map("/eos/out/event/show/saved", handle_show_saved)
+    disp.map("/eos/out/get/version", handle_version)
+
     disp.map("/eos/out/get/*", handle_get_count)
     disp.map("/eos/out/get/*", handle_get_detail)
+    disp.map("/eos/out/notify/*", handle_notify)
 
     disp.set_default_handler(default_handler)
     return disp
@@ -418,7 +516,26 @@ class OscListener:
         self._thread = threading.Thread(target=self._serve, name="eos-osc-listener", daemon=True)
         self._thread.start()
         logger.info("OSC listener bound to %s", self.bound_address)
+        self._subscribe()
         return True
+
+    def _subscribe(self) -> None:
+        """Ask Eos to push show data changes to us.
+
+        Without this Eos answers one-shot requests and pushes nothing else, so
+        selection and live/blind never populate. Doing it on every bind rather
+        than only inside ``sync_state`` means a rebind cannot silently leave the
+        connection half-alive - listening, but deaf to everything unsolicited.
+
+        Failure is logged rather than raised: the listener is up either way, and
+        a send error here should not look like a bind failure.
+        """
+        from .client import client  # Imported late; the client imports config too.
+
+        try:
+            client.send("/eos/subscribe", 1)
+        except EosError as exc:
+            logger.warning("Could not subscribe to console updates: %s", exc)
 
     def _serve(self) -> None:
         assert self._server is not None

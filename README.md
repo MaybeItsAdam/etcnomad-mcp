@@ -125,7 +125,13 @@ Invalid values are rejected at startup with a message naming the variable.
 Every tool returns a structured result with an `ok` field. `ok: false` means the command never
 reached the console, and `error` says why — check it rather than assuming success.
 
-**Diagnostics** — `get_connection_health`, `sync_state`
+**Diagnostics** — `get_connection_health`, `sync_state`, `get_show_info`
+
+**Show data** — `list_show_targets`, `get_show_inventory`, `audit_show`
+
+Enumeration answers "what already exists?". Eos replaces an occupied target
+without warning and offers no undo, so check before recording. `audit_show` reports
+duplicate labels, labels differing only by case, and unlabelled targets.
 
 **Status** — `get_active_cue`, `get_pending_cue`, `get_live_blind_state`, `get_command_line`,
 `get_selection`, `get_faders`, `get_direct_selects`, `get_system_state`
@@ -144,7 +150,12 @@ operations)
 **Colour and position** — `set_color_rgb`, `set_color_hs`, `set_color_xy`, `set_pan_tilt`,
 `set_xyz`
 
-**Faders and direct selects** — `set_fader`, `control_fader_button`, `press_direct_select`
+**Faders and direct selects** — `configure_fader_bank`, `configure_direct_selects`,
+`set_fader`, `control_fader_button`, `press_direct_select`
+
+A bank must be *created* before Eos sends any labels or levels for it, so
+`get_faders` and `get_direct_selects` stay empty until `configure_fader_bank` /
+`configure_direct_selects` has been called. `sync_state` creates a default bank of ten.
 
 **Presets** — `fire_preset`, `fire_palette`, `recall_snapshot`, `bump_sub`
 

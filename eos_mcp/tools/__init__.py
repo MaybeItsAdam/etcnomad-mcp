@@ -1,6 +1,7 @@
 """Importing this package registers every tool with the FastMCP app."""
 
 from . import (
+    audit,
     color_position,
     cue_list_banks,
     faders,
@@ -16,6 +17,7 @@ from . import (
 )
 
 __all__ = [
+    "audit",
     "color_position",
     "cue_list_banks",
     "faders",

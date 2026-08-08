@@ -45,6 +45,10 @@ class ShowTarget:
     number: str
     label: str = ""
     uid: str = ""
+    #: Type-specific fields decoded from the reply, e.g. a patch entry's
+    #: manufacturer, model and address. Empty for types with nothing beyond
+    #: a label.
+    extra: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -72,6 +76,15 @@ class EosState:
     wheel_mode: object | None = None
     pantilt: list[float] = field(default_factory=list)
     xyz: list[float] = field(default_factory=list)
+    #: Which show is loaded. Without this there is no way to tell whether the
+    #: console holds the show you think it does - and auditing or writing to
+    #: the wrong show is worse than doing nothing.
+    show_name: str | None = None
+    show_path: str | None = None
+    #: ``True`` once Eos reports a save. Show-file settings, including OSC
+    #: transmit, are lost on restart if the show was never saved.
+    show_saved: bool | None = None
+    eos_version: str | None = None
     #: How many records Eos says exist, keyed by target type ("sub", "fx", ...).
     target_counts: dict[str, int] = field(default_factory=dict)
     #: Collected records, keyed by target type then target number.

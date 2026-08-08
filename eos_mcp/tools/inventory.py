@@ -63,7 +63,7 @@ def _await_count(token: str) -> int | None:
     return None
 
 
-def _enumerate(token: str) -> tuple[int | None, list[dict[str, str]]]:
+def _enumerate(token: str) -> tuple[int | None, list[dict[str, object]]]:
     """Run the count-then-index protocol for one target type."""
     # Drop any previous answer so a stale count cannot satisfy the wait below.
     with state_lock:
@@ -90,10 +90,11 @@ def _enumerate(token: str) -> tuple[int | None, list[dict[str, str]]]:
         time.sleep(POLL_INTERVAL)
 
     records = snapshot().show_targets.get(bucket_key, {})
-    rows = [
-        {"number": rec.number, "label": rec.label}
-        for rec in sorted(records.values(), key=lambda r: _sort_key(r.number))
-    ]
+    rows: list[dict[str, object]] = []
+    for rec in sorted(records.values(), key=lambda r: _sort_key(r.number)):
+        row: dict[str, object] = {"number": rec.number, "label": rec.label}
+        row.update(rec.extra)
+        rows.append(row)
     return count, rows
 
 
